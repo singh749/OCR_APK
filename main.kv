@@ -1,0 +1,509 @@
+# main.kv - Kivy UI Layout File
+# OCR Number Scanner App - Metal Engraved Number Reader
+
+#:import dp kivy.metrics.dp
+#:import sp kivy.metrics.sp
+#:import Clock kivy.clock.Clock
+
+<RoundedButton@Button>:
+    background_normal: ''
+    background_color: 0, 0, 0, 0
+    canvas.before:
+        Color:
+            rgba: self.btn_color if self.btn_color else (0.2, 0.6, 1, 1)
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(12)]
+    btn_color: (0.2, 0.6, 1, 1)
+    color: 1, 1, 1, 1
+    bold: True
+    font_size: sp(15)
+
+<CardWidget@BoxLayout>:
+    canvas.before:
+        Color:
+            rgba: 0.12, 0.13, 0.18, 1
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(16)]
+    padding: dp(16)
+    spacing: dp(8)
+
+<HistoryItem@BoxLayout>:
+    result_text: ''
+    timestamp_text: ''
+    engine_text: ''
+    conf_text: ''
+    size_hint_y: None
+    height: dp(70)
+    spacing: dp(8)
+    padding: [dp(12), dp(8)]
+    canvas.before:
+        Color:
+            rgba: 0.15, 0.16, 0.22, 1
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(12)]
+    BoxLayout:
+        orientation: 'vertical'
+        spacing: dp(2)
+        Label:
+            text: root.result_text
+            font_size: sp(18)
+            bold: True
+            color: 0.2, 0.85, 0.5, 1
+            halign: 'left'
+            valign: 'middle'
+            text_size: self.size
+        Label:
+            text: root.timestamp_text
+            font_size: sp(11)
+            color: 0.6, 0.6, 0.7, 1
+            halign: 'left'
+            valign: 'top'
+            text_size: self.size
+    Label:
+        text: root.engine_text
+        font_size: sp(11)
+        color: 0.4, 0.7, 1, 1
+        size_hint_x: 0.3
+        halign: 'right'
+        text_size: self.size
+        valign: 'middle'
+
+<MainScreen>:
+    name: 'main'
+    canvas.before:
+        Color:
+            rgba: 0.07, 0.08, 0.12, 1
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    
+    BoxLayout:
+        orientation: 'vertical'
+        spacing: 0
+        padding: 0
+        
+        # ---- TOP HEADER ----
+        BoxLayout:
+            size_hint_y: None
+            height: dp(65)
+            padding: [dp(20), dp(10)]
+            canvas.before:
+                Color:
+                    rgba: 0.10, 0.11, 0.17, 1
+                Rectangle:
+                    pos: self.pos
+                    size: self.size
+            Label:
+                text: '[b]OCR[/b] Number Scanner'
+                markup: True
+                font_size: sp(22)
+                color: 1, 1, 1, 1
+                halign: 'left'
+                text_size: self.size
+                valign: 'middle'
+            Label:
+                text: '[b]Metal Series[/b]'
+                markup: True
+                font_size: sp(12)
+                color: 0.2, 0.85, 0.5, 1
+                halign: 'right'
+                text_size: self.size
+                valign: 'middle'
+                size_hint_x: 0.5
+        
+        # ---- SCROLLABLE MAIN CONTENT ----
+        ScrollView:
+            BoxLayout:
+                orientation: 'vertical'
+                spacing: dp(16)
+                padding: [dp(16), dp(16)]
+                size_hint_y: None
+                height: self.minimum_height
+                
+                # ---- IMAGE PREVIEW CARD ----
+                CardWidget:
+                    orientation: 'vertical'
+                    size_hint_y: None
+                    height: dp(280)
+                    spacing: dp(12)
+                    
+                    Label:
+                        text: 'Image Preview'
+                        font_size: sp(13)
+                        color: 0.5, 0.55, 0.65, 1
+                        size_hint_y: None
+                        height: dp(20)
+                        halign: 'left'
+                        text_size: self.size
+                    
+                    # Image display area
+                    BoxLayout:
+                        canvas.before:
+                            Color:
+                                rgba: 0.08, 0.09, 0.14, 1
+                            RoundedRectangle:
+                                pos: self.pos
+                                size: self.size
+                                radius: [dp(12)]
+                        
+                        Image:
+                            id: preview_image
+                            source: ''
+                            fit_mode: 'contain'
+                            size_hint: 1, 1
+                        
+                        Label:
+                            id: no_image_label
+                            text: '[b]No Image Selected[/b]\n\nUse Camera or Upload Image\nto begin scanning'
+                            markup: True
+                            font_size: sp(14)
+                            color: 0.3, 0.35, 0.45, 1
+                            halign: 'center'
+                            valign: 'middle'
+                            text_size: self.size
+                    
+                    # Action buttons
+                    BoxLayout:
+                        size_hint_y: None
+                        height: dp(50)
+                        spacing: dp(10)
+                        
+                        RoundedButton:
+                            text: 'Upload Image'
+                            btn_color: 0.2, 0.5, 0.9, 1
+                            on_press: app.open_file_picker()
+                        
+                        RoundedButton:
+                            text: 'Camera'
+                            btn_color: 0.15, 0.65, 0.45, 1
+                            on_press: app.open_camera()
+                
+                # ---- OCR RESULT CARD ----
+                CardWidget:
+                    orientation: 'vertical'
+                    size_hint_y: None
+                    height: dp(290)
+                    spacing: dp(10)
+                    
+                    # Header row
+                    BoxLayout:
+                        size_hint_y: None
+                        height: dp(25)
+                        Label:
+                            text: 'OCR Result (Tap to Edit)'
+                            font_size: sp(13)
+                            color: 0.5, 0.55, 0.65, 1
+                            halign: 'left'
+                            text_size: self.size
+                        Label:
+                            id: engine_label
+                            text: ''
+                            font_size: sp(11)
+                            color: 0.4, 0.7, 1, 1
+                            halign: 'right'
+                            text_size: self.size
+                    
+                    # BIG NUMBER DISPLAY (Editable + Copy)
+                    BoxLayout:
+                        size_hint_y: None
+                        height: dp(60)
+                        canvas.before:
+                            Color:
+                                rgba: 0.08, 0.09, 0.14, 1
+                            RoundedRectangle:
+                                pos: self.pos
+                                size: self.size
+                                radius: [dp(12)]
+                        padding: [dp(10), dp(6)]
+                        spacing: dp(8)
+                        
+                        TextInput:
+                            id: result_number
+                            text: '---'
+                            font_size: sp(26)
+                            bold: True
+                            multiline: False
+                            foreground_color: 0.2, 0.9, 0.55, 1
+                            background_normal: ''
+                            background_color: 0, 0, 0, 0
+                            cursor_color: 0.2, 0.9, 0.55, 1
+                            padding: [dp(8), dp(10)]
+                            halign: 'center'
+                        
+                        Button:
+                            text: 'Copy'
+                            size_hint_x: None
+                            width: dp(65)
+                            background_normal: ''
+                            background_color: 0.18, 0.22, 0.32, 1
+                            color: 0.3, 0.85, 1, 1
+                            font_size: sp(13)
+                            bold: True
+                            on_press: app.copy_number()
+
+                    # SUGGESTIONS / ALTERNATIVES ROW
+                    BoxLayout:
+                        id: suggestions_row
+                        size_hint_y: None
+                        height: dp(34)
+                        spacing: dp(6)
+                        Label:
+                            text: 'Suggestions:'
+                            font_size: sp(11)
+                            color: 0.5, 0.55, 0.65, 1
+                            size_hint_x: None
+                            width: dp(75)
+                            halign: 'left'
+                            valign: 'middle'
+                            text_size: self.size
+                        ScrollView:
+                            do_scroll_y: False
+                            do_scroll_x: True
+                            BoxLayout:
+                                id: suggestions_chips
+                                orientation: 'horizontal'
+                                size_hint_x: None
+                                width: self.minimum_width
+                                spacing: dp(6)
+
+                    # Confidence bar
+                    BoxLayout:
+                        size_hint_y: None
+                        height: dp(26)
+                        spacing: dp(8)
+                        Label:
+                            text: 'Confidence:'
+                            font_size: sp(12)
+                            color: 0.5, 0.55, 0.65, 1
+                            size_hint_x: 0.35
+                            halign: 'left'
+                            text_size: self.size
+                            valign: 'middle'
+                        ProgressBar:
+                            id: confidence_bar
+                            max: 100
+                            value: 0
+                            size_hint_x: 0.45
+                        Label:
+                            id: confidence_label
+                            text: '0%'
+                            font_size: sp(13)
+                            bold: True
+                            color: 0.2, 0.85, 0.5, 1
+                            size_hint_x: 0.2
+                            halign: 'right'
+                            text_size: self.size
+                            valign: 'middle'
+                    
+                    # Scan button row
+                    BoxLayout:
+                        size_hint_y: None
+                        height: dp(48)
+                        spacing: dp(10)
+
+                        RoundedButton:
+                            id: scan_btn
+                            text: 'SCAN NUMBER'
+                            btn_color: 0.85, 0.3, 0.2, 1
+                            font_size: sp(16)
+                            on_press: app.run_ocr()
+
+                        Button:
+                            text: 'Save'
+                            size_hint_x: None
+                            width: dp(80)
+                            background_normal: ''
+                            background_color: 0.15, 0.65, 0.45, 1
+                            font_size: sp(14)
+                            bold: True
+                            on_press: app.save_current_number()
+                
+                # ---- PREPROCESSING COMPARISON ----
+                CardWidget:
+                    id: both_results_card
+                    orientation: 'vertical'
+                    size_hint_y: None
+                    height: dp(100)
+                    spacing: dp(6)
+                    
+                    Label:
+                        text: 'Top Preprocessing Results'
+                        font_size: sp(13)
+                        color: 0.5, 0.55, 0.65, 1
+                        size_hint_y: None
+                        height: dp(20)
+                        halign: 'left'
+                        text_size: self.size
+                    
+                    BoxLayout:
+                        spacing: dp(10)
+                        BoxLayout:
+                            canvas.before:
+                                Color:
+                                    rgba: 0.08, 0.09, 0.14, 1
+                                RoundedRectangle:
+                                    pos: self.pos
+                                    size: self.size
+                                    radius: [dp(8)]
+                            padding: dp(8)
+                            orientation: 'vertical'
+                            Label:
+                                text: '#1 Best'
+                                font_size: sp(11)
+                                color: 0.4, 0.6, 1, 1
+                                size_hint_y: None
+                                height: dp(18)
+                                halign: 'center'
+                                text_size: self.size
+                            Label:
+                                id: tess_result
+                                text: '---'
+                                font_size: sp(12)
+                                bold: True
+                                color: 1, 1, 1, 1
+                                halign: 'center'
+                                text_size: self.size
+                        BoxLayout:
+                            canvas.before:
+                                Color:
+                                    rgba: 0.08, 0.09, 0.14, 1
+                                RoundedRectangle:
+                                    pos: self.pos
+                                    size: self.size
+                                    radius: [dp(8)]
+                            padding: dp(8)
+                            orientation: 'vertical'
+                            Label:
+                                text: '#2 Alt'
+                                font_size: sp(11)
+                                color: 0.2, 0.8, 0.5, 1
+                                size_hint_y: None
+                                height: dp(18)
+                                halign: 'center'
+                                text_size: self.size
+                            Label:
+                                id: easy_result
+                                text: '---'
+                                font_size: sp(12)
+                                bold: True
+                                color: 1, 1, 1, 1
+                                halign: 'center'
+                                text_size: self.size
+        
+        # ---- BOTTOM NAVIGATION BAR ----
+        BoxLayout:
+            size_hint_y: None
+            height: dp(60)
+            spacing: 0
+            canvas.before:
+                Color:
+                    rgba: 0.10, 0.11, 0.17, 1
+                Rectangle:
+                    pos: self.pos
+                    size: self.size
+            Button:
+                text: 'Scan'
+                background_normal: ''
+                background_color: 0, 0, 0, 0
+                bold: True
+                font_size: sp(13)
+                color: 0.2, 0.85, 0.5, 1
+            Button:
+                text: 'History'
+                background_normal: ''
+                background_color: 0, 0, 0, 0
+                font_size: sp(13)
+                color: 0.5, 0.55, 0.65, 1
+                on_press: app.go_to_history()
+
+<HistoryScreen>:
+    name: 'history'
+    canvas.before:
+        Color:
+            rgba: 0.07, 0.08, 0.12, 1
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    
+    BoxLayout:
+        orientation: 'vertical'
+        
+        # Header
+        BoxLayout:
+            size_hint_y: None
+            height: dp(65)
+            padding: [dp(20), dp(10)]
+            spacing: dp(10)
+            canvas.before:
+                Color:
+                    rgba: 0.10, 0.11, 0.17, 1
+                Rectangle:
+                    pos: self.pos
+                    size: self.size
+            Button:
+                text: '<'
+                size_hint_x: None
+                width: dp(40)
+                background_normal: ''
+                background_color: 0, 0, 0, 0
+                font_size: sp(22)
+                bold: True
+                color: 0.4, 0.7, 1, 1
+                on_press: app.go_to_main()
+            Label:
+                text: '[b]OCR History[/b]'
+                markup: True
+                font_size: sp(20)
+                color: 1, 1, 1, 1
+                halign: 'left'
+                text_size: self.size
+                valign: 'middle'
+            Label:
+                id: total_label
+                text: '0 records'
+                font_size: sp(12)
+                color: 0.5, 0.55, 0.65, 1
+                halign: 'right'
+                text_size: self.size
+                valign: 'middle'
+        
+        # Search Bar
+        BoxLayout:
+            size_hint_y: None
+            height: dp(50)
+            padding: [dp(16), dp(8)]
+            spacing: dp(8)
+            canvas.before:
+                Color:
+                    rgba: 0.10, 0.11, 0.17, 1
+                Rectangle:
+                    pos: self.pos
+                    size: self.size
+            TextInput:
+                id: search_input
+                hint_text: 'Search number...'
+                multiline: False
+                background_normal: ''
+                background_color: 0.15, 0.16, 0.22, 1
+                foreground_color: 1, 1, 1, 1
+                cursor_color: 0.2, 0.85, 0.5, 1
+                hint_text_color: 0.4, 0.45, 0.55, 1
+                font_size: sp(15)
+                padding: [dp(12), dp(8)]
+                on_text: app.search_history(self.text)
+        
+        # History List
+        ScrollView:
+            BoxLayout:
+                id: history_list
+                orientation: 'vertical'
+                spacing: dp(8)
+                padding: [dp(16), dp(12)]
+                size_hint_y: None
+                height: self.minimum_height
