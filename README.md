@@ -61,11 +61,28 @@ python main.py
 |---|---|---|
 | 1 | `Install System Dependencies` → `Process completed with exit code 100` | `ubuntu-latest` is Ubuntu 24.04, where `libtinfo5`, `libncurses5-dev` and `libncursesw5-dev` no longer exist in the archive, so `apt-get install` aborted. They are replaced by `libtinfo6` / `libncurses-dev`, and the runner image is pinned to `ubuntu-24.04` (the `latest` alias moves to 26.04 on 2026-10-19). Missing real Buildozer deps (`ant`/`ccache`/`autopoint`/`libltdl-dev`/`patch`/`lbzip2`/`make`) were added. |
 | 2 | `# Errors in buildozer.spec: [app] One of "version" or "version.regex" must be set` | `buildozer.spec` had no version at all → added `version = 1.0`. |
-| 3 | `Couldn't find the tesseract recipe` | `requirements` listed `pytesseract` and `tesseract`; python-for-android has no recipe for either (nor for `easyocr`/`torch`). Only real recipes are listed now: `python3,kivy,android,pyjnius,sqlite3,numpy,pillow,opencv`. |
+| 3 | `Couldn't find the tesseract recipe` | `requirements` listed `pytesseract` and `tesseract`; python-for-android has no recipe for either (nor for `easyocr`/`torch`). Only names that exist as p4a recipes are listed now (`python3`, `hostpython3`, `kivy`, `android`, `pyjnius`, `sqlite3`, `numpy`, `pillow`, `opencv` — verified against `pythonforandroid/recipes/`). |
 | 4 | `android.ndk_api = 33` | `ndk_api` is the *minimum* SDK, so the APK would have refused to install below Android 13. Dropped; `android.api`/`minapi`/`ndk` are left at buildozer + p4a's matching defaults instead of hand-pinned versions. |
 | 5 | `Node.js 20 is deprecated … actions/checkout@v4, actions/setup-python@v5` | Actions bumped to `checkout@v7`, `setup-python@v7`, `setup-java@v6`, `upload-artifact@v7`. |
-| 6 | Red ✕ with no explanation | Added a `Show effective buildozer.spec` step, an *Attach build logs on failure* step (`buildozer.log` / p4a `build.log`), an explicit `JAVA_HOME` via `setup-java`, `timeout-minutes: 120`, and `PYTHONFORANDROID_PREREQUISITES_INSTALL_INTERACTIVE=0` so p4a never blocks on a question. |
+| 6 | Red ✕ with no explanation | Added a `Show effective buildozer.spec` step, the failure report described below, an explicit `JAVA_HOME` via `setup-java`, `timeout-minutes: 120`, and `PYTHONFORANDROID_PREREQUISITES_INSTALL_INTERACTIVE=0` so p4a never blocks on a question. |
 | 7 | Two dead copies of the workflow in the repo root | `build-apk.yml` (duplicate) and `github_workflows_build-apk.yml` (a Gradle `./gradlew assembleRelease` build for a project that has no `gradlew`, no `app/` module and no `android/` project — this is a Buildozer project) were removed; `.github/workflows/build-apk.yml` is the single source of truth. A `.gitignore` for `.buildozer/`, `bin/`, `*.db` and `temp_images/` was added. |
+| 8 | Build died ~25 min in, inside the Kivy recipe | python-for-android master builds **CPython 3.14.2** for the device, and no released Kivy supports 3.14 (Kivy 2.3.1 supports 3.8–3.13, see kivy/kivy#9225), so the compile fails with `_PyLong_AsByteArray called with incorrect number of arguments` — the same bug that broke the `kivy/buildozer:latest` Docker image (buildozer#2040). Fix: pin the interpreter that is *compiled into the APK*: `requirements = python3==3.13.16,hostpython3==3.13.16,...`. Both must be pinned, because p4a aborts when they differ (`python3 should have same version as hostpython3`). |
+
+### Reading a failure yourself
+
+The log is 30k+ lines, so the workflow extracts and publishes the meaningful
+part for you. Every failed run gives you:
+
+* a **“Build log excerpt” check run** on the commit — Actions → the run →
+  *Show all checks* → Build log excerpt; it holds the log region around
+  Buildozer's own `Buildozer failed to execute the last command` banner;
+* the same text in the **job summary** of the `Report the failure` step;
+* a **comment on the pull request** (for `pull_request` runs);
+* the **`build-log` artifact** with the complete, unfiltered `build.log`.
+
+This is `.ci/ci_failure_report.py`. The build step pipes its console through a
+small `sed` filter on purpose: a job only keeps ~10 annotations, and thousands
+of harmless SDL2 `warning:` lines would otherwise use them all up.
 
 ---
 

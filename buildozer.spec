@@ -23,8 +23,16 @@ source.exclude_patterns = license,authors.*
 # previous spec died with "Couldn't find the tesseract recipe". Tesseract is a
 # desktop binary and cannot be shipped this way; PyTorch has no Android build
 # here either. See README.md for the on-device options.
+#
+# The python3/hostpython3 pin is the important one: python-for-android master
+# builds CPython 3.14.2 for the device, but no released Kivy supports 3.14
+# (Kivy 2.3.1 supports 3.8-3.13), so the Kivy recipe dies with
+#     _PyLong_AsByteArray called with incorrect number of arguments
+# Pin 3.13 for BOTH recipes: p4a refuses to build if the two differ
+# ("python3 should have same version as hostpython3"), which is why pinning
+# only python3==... is a dead end.
 # ---------------------------------------------------------------------------
-requirements = python3,kivy,android,pyjnius,sqlite3,numpy,pillow,opencv
+requirements = python3==3.13.16,hostpython3==3.13.16,kivy,android,pyjnius,sqlite3,numpy,pillow,opencv
 
 # One ABI only: each extra ABI doubles the compile time of numpy/OpenCV.
 # Add armeabi-v7a (or x86_64 for emulators) once the build is green.
