@@ -31,7 +31,7 @@ it as an artifact:
    (*Settings → Install unknown apps* must be allowed for your file manager).
 
 The first build takes **roughly 30–45 min**: Buildozer downloads the Android SDK
-+ NDK and cross-compiles CPython, Kivy, numpy, Pillow and OpenCV. Later builds
++ NDK and cross-compiles CPython, Kivy, numpy and OpenCV. Later builds
 reuse the cached `.buildozer` directory only on the same machine (locally) — on
 GitHub each run starts from scratch, so the `arm64-v8a` ABI is the only one
 built. Add `armeabi-v7a` to `android.archs` in `buildozer.spec` if you need
@@ -67,7 +67,7 @@ python main.py
 |---|---|---|
 | 1 | `Install System Dependencies` → `Process completed with exit code 100` | `ubuntu-latest` is Ubuntu 24.04, where `libtinfo5`, `libncurses5-dev` and `libncursesw5-dev` no longer exist in the archive, so `apt-get install` aborted. They are replaced by `libtinfo6` / `libncurses-dev`, and the runner image is pinned to `ubuntu-24.04` (the `latest` alias moves to 26.04 on 2026-10-19). Missing real Buildozer deps (`ant`/`ccache`/`autopoint`/`libltdl-dev`/`patch`/`lbzip2`/`make`) were added. |
 | 2 | `# Errors in buildozer.spec: [app] One of "version" or "version.regex" must be set` | `buildozer.spec` had no version at all → added `version = 1.0`. |
-| 3 | `Couldn't find the tesseract recipe` | `requirements` listed `pytesseract` and `tesseract`; python-for-android has no recipe for either (nor for `easyocr`/`torch`). Only names that exist as p4a recipes are listed now (`python3`, `hostpython3`, `kivy`, `android`, `pyjnius`, `sqlite3`, `numpy`, `pillow`, `opencv` — verified against `pythonforandroid/recipes/`). |
+| 3 | `Couldn't find the tesseract recipe` | `requirements` listed `pytesseract` and `tesseract`; python-for-android has no recipe for either (nor for `easyocr`/`torch`). Only names that exist as p4a recipes are listed now (`python3`, `hostpython3`, `kivy`, `android`, `pyjnius`, `sqlite3`, `numpy`, `opencv` — verified against `pythonforandroid/recipes/`; `pillow` was listed here until it was dropped for shipping nothing but three extra native builds — see "OCR engine on Android"). |
 | 4 | `android.ndk_api = 33` | `ndk_api` is the *minimum* SDK, so the APK would have refused to install below Android 13. Dropped; `android.api`/`minapi`/`ndk` are left at buildozer + p4a's matching defaults instead of hand-pinned versions. |
 | 5 | `Node.js 20 is deprecated … actions/checkout@v4, actions/setup-python@v5` | Actions bumped to `checkout@v7`, `setup-python@v7`, `setup-java@v6`, `upload-artifact@v7`. |
 | 6 | Red ✕ with no explanation | Added a `Show effective buildozer.spec` step, the failure report described below, an explicit `JAVA_HOME` via `setup-java`, `timeout-minutes: 120`, and `PYTHONFORANDROID_PREREQUISITES_INSTALL_INTERACTIVE=0` so p4a never blocks on a question. |

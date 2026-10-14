@@ -112,7 +112,7 @@ jobs:
 
       - name: Build debug APK with Buildozer
         # First run downloads the Android SDK + NDK and cross-compiles
-        # CPython, Kivy, numpy, Pillow and OpenCV: expect roughly 30-45 min.
+        # CPython, Kivy, numpy and OpenCV: expect roughly 30-45 min.
         # `tee build.log` keeps a copy of the output on disk: buildozer's
         # chatter is tens of thousands of lines and the real error is buried
         # in it, so the report step below needs a file to grep.

@@ -32,7 +32,17 @@ source.exclude_patterns = license,authors.*
 # ("python3 should have same version as hostpython3"), which is why pinning
 # only python3==... is a dead end.
 # ---------------------------------------------------------------------------
-requirements = python3==3.13.16,hostpython3==3.13.16,kivy,android,pyjnius,sqlite3,numpy,pillow,opencv
+# `pillow` is deliberately NOT in this list, even though requirements.txt has it
+# for desktop: nothing in main.py / ocr_engine.py / database.py imports PIL, and
+# p4a's Pillow recipe pulls `png` + `jpeg` + `freetype` native builds with it, so
+# shipping it meant three extra ABI-specific `.so` files and a bigger bundle to
+# unpack on first launch - all of which can only fail on a handset nobody here can
+# reach. The preview still decodes jpg/png without it: Kivy's `img_sdl2` provider
+# lists ('bmp','jpg','jpeg','jpe','lbm','pcx','png','pnm', ...) and python-for-android
+# builds SDL2_image with its own bundled codecs (its recipe clones the submodules).
+# buildozer's own optional use of PIL is satisfied by its pip install, not by this
+# line, so the tooling is unaffected either.
+requirements = python3==3.13.16,hostpython3==3.13.16,kivy,android,pyjnius,sqlite3,numpy,opencv
 
 # Which python-for-android branch to build with. `develop` is what buildozer's
 # own CI and install docs use, and it is required here: the master snapshot
