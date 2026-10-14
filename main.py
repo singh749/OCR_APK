@@ -418,7 +418,7 @@ class OCRScannerApp(App):
         except Exception:  # noqa: BLE001 - cosmetic only
             pass
 
-    def _force_layout_pass(self, passes=5):
+    def _force_layout_pass(self, passes=8):
         """Size the widget tree by hand, level by level, before measuring it.
 
         Kivy applies layouts in `Clock.create_trigger(self.do_layout, -1)` - once per
@@ -435,6 +435,10 @@ class OCRScannerApp(App):
             return
         screen = getattr(self.root, "current_screen", None)
         frontier = [self.root] + ([screen] if screen is not None else [])
+        # 8, not 4: the deepest widget this file reports on (result_number) sits
+        # four levels under the screen, each level needs one pass, and the extra
+        # headroom costs microseconds of arithmetic on ~60 widgets while a wrong
+        # guess here costs a false alarm on a phone that is behaving perfectly.
         for _ in range(passes):
             if not frontier:
                 break
