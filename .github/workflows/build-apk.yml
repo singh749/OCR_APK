@@ -27,7 +27,16 @@ permissions:
 # Two pushes in a row used to cancel each other's *finished-so-far* work: GitHub's
 # duplicate-run handling kills the older in-progress run, and the run that builds the
 # APK takes 25-45 minutes, so the cancellation is what left a branch whose newest
-# commit had no APK at all. Queue instead of cancelling: both builds complete.
+# commit had no APK at all. Queue instead of cancelling: a build already under way is
+# left alone and both complete.
+#
+# Observed behaviour worth knowing before anyone "improves" this: `false` protects a
+# *running* job, not a queued one. A push that arrives while another run is still
+# `pending` in this group gets that older pending run cancelled (seen on run
+# 38644432729, head ae0cbb5, "cancelled" without anyone touching it). That is the
+# wanted outcome here - superseded commits never need an APK, and the branch's newest
+# head is always the one that gets built and uploaded - but it is NOT a guarantee
+# that every push produces an artifact.
 concurrency:
   group: ocr-apk-${{ github.ref }}
   cancel-in-progress: false
