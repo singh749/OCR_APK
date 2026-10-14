@@ -4,15 +4,13 @@
 A red GitHub Actions "X" normally tells you nothing: the real error is buried
 tens of thousands of lines deep in the Buildozer log. This script
 
-  1. finds the lines that actually explain the failure (the log region around
-     Buildozer's own "the last command failed" marker, falling back to the
-     tail of the log),
+  1. picks out the log lines that actually explain the failure (the last
+     error-looking lines, each with a little context, while skipping compiler
+     warnings and Buildozer's environment dump),
   2. publishes them where they can be read:
-       * a dedicated check run ("Build log excerpt") whose output.summary is
-         plain API-readable text -- check runs are the only channel that both
-         humans and the REST API expose in full,
-       * `::error::` annotations (a runner only keeps ~10 per job, so this is
-         deliberately limited to the most decisive lines),
+       * a dedicated check run ("Build log excerpt") -- check-run output is
+         shown in the UI *and* fully readable through the REST API,
+       * one packed `::error::` annotation (a job only keeps ~10 annotations),
        * the job step summary,
        * a comment on the open pull request, if there is one.
 
@@ -28,39 +26,53 @@ import urllib.request
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
-# Buildozer prints its own banner when a recipe's build command dies; the lines
-# right after it are the failing command and its output.
-FAILURE_MARKERS = (
-    "Buildozer failed to execute the last command",
-    "Error running command",
-    "ERROR: Should have a quantum",
-    "Build Interrupting Exception",
-    "BuildInterruptingException",
-    "ERROR: Please",
-    "No recipe named",
-    "Couldn't find the",
-    "ERROR: ",
-)
-
-ERROR_RE = re.compile(
-    r"(\berror\b|Error:|fatal:|Traceback|Critical error|Could NOT find|"
-    r"No such file or directory|undefined reference|undeclared identifier|"
-    r"command failed|exit code|cannot execute|Permission denied|"
-    r"RequirementNotFound|BuildInterruptingException)",
+# Lines that explain a failure. Deliberately broad: recipe errors, compiler
+# diagnostics, missing files, p4a's own exceptions.
+SIGNAL_RE = re.compile(
+    r"(error:|\bERROR\b|\bError\b|\berror\b|fatal:|Traceback \(most recent call last\)"
+    r"|Could NOT find|No such file or directory|undefined reference|undeclared identifier"
+    r"|No recipe named|Couldn't find|RequirementNotFound|BuildInterruptingException"
+    r"|Error running command|Command failed|exit code \d+|cannot execute"
+    r"|Permission denied|\*\*\* \[|failed to execute)",
     re.IGNORECASE,
 )
 
-# Compiler warnings are noise here: they flood the log and they also steal the
-# runner's ~10 annotation slots (they contain the word "error").
+# Noise that must not crowd out the real error: compiler warnings and notes, and
+# Buildozer's trailing boilerplate (banner + the environment dump it prints
+# underneath "Buildozer failed to execute the last command").
 NOISE_RE = re.compile(
-    r"(warning:|\bnote:|to allow an error code|^\s*\d+\.\s|deprecated|"
-    r"^remote:|Resolving |^Receiving |^Counting |^Compressing |Unpacking objects)",
+    r"(warning:|\snote:|to allow an error code|deprecated"
+    r"|^\s*\d+\.\s|^remote:|Resolving |^Receiving |^Counting |^Compressing )",
+    re.IGNORECASE,
+)
+BOILERPLATE_RE = re.compile(
+    r"(^#\s{2,}\S+ = |^#\s*$|^# (Buildozer failed|The error might|Please read"
+    r"|In case of a bug report|Ensure build layout|Android packaging failed"
+    r"|Tap .* to share))",
+)
+# python-for-android logs "Building <recipe> for <arch>" (build.py), which is
+# what tells you *which* recipe blew up.
+RECIPE_RE = re.compile(
+    r"\b(?:Building|Prebuilding|Postbuilding|Unpacking|Downloading) ([\w.\-]+) for \b"
+)
+
+# Lines that are worth keeping even when they also look like noise: the real
+# diagnostics. Everything matching NOISE_RE/BOILERPLATE_RE and not this is cut.
+STRONG_RE = re.compile(
+    r"(error:|\[ERROR\]|^\s*ERROR|Traceback \(most recent call last\)"
+    r"|undefined reference|undeclared identifier|\*\*\* \[|No such file or directory"
+    r"|No recipe named|Couldn't find|Command failed|Error running command"
+    r"|BuildInterruptingException|RequirementNotFound|exit code \d+)",
     re.IGNORECASE,
 )
 
 MAX_SUMMARY_CHARS = 60000
 MAX_ANNOTATION_CHARS = 1000
 ANNOTATION_LINES = 6
+CONTEXT_BEFORE = 6
+CONTEXT_AFTER = 2
+SIGNAL_BLOCKS = 10          # how many of the last error clusters to keep
+MAX_BLOCK_LINES = 100
 TAIL_FALLBACK_LINES = 60
 
 
@@ -96,60 +108,93 @@ def read_lines(path, limit_bytes=48 * 1024 * 1024):
     return [ANSI_RE.sub("", line).rstrip() for line in chunk.splitlines()]
 
 
+def is_cut(line):
+    """True for compiler warnings / Buildozer boilerplate that hide the real error."""
+    if STRONG_RE.search(line):
+        return False
+    return bool(NOISE_RE.search(line) or BOILERPLATE_RE.search(line))
+
+
+def signal_indices(lines):
+    """Positions of lines that look like the cause of the failure."""
+    out = []
+    for index, line in enumerate(lines):
+        text = line.strip()
+        if not text or len(text) > 500:
+            continue
+        if is_cut(text):
+            continue
+        if SIGNAL_RE.search(text) or STRONG_RE.search(text):
+            out.append(index)
+    return out
+
+
+def excerpt_from(lines):
+    """The last few error clusters, oldest first, with a bit of context."""
+    signals = signal_indices(lines)
+    if not signals:
+        return [line for line in lines[-TAIL_FALLBACK_LINES:] if line.strip()], None
+
+    picked = signals[-SIGNAL_BLOCKS:]
+    keep = set()
+    for index in picked:
+        keep.update(range(max(0, index - CONTEXT_BEFORE),
+                          min(len(lines), index + 1 + CONTEXT_AFTER)))
+
+    ordered = sorted(keep)
+    ranges, start, previous = [], ordered[0], ordered[0]
+    for index in ordered[1:]:
+        if index - previous > 3:
+            ranges.append((start, previous))
+            start = index
+        previous = index
+    ranges.append((start, previous))
+
+    block = []
+    for first, last in ranges:
+        for i in range(first, last + 1):
+            line = lines[i].rstrip()
+            if not line.strip():
+                continue
+            # keep diagnostics; keep context only when it is not
+            # compiler-warning noise or Buildozer boilerplate
+            if not is_cut(line):
+                block.append(line)
+    return block[-MAX_BLOCK_LINES:], last_recipe(lines)
+
+
+def last_recipe(lines):
+    recipe = None
+    for line in lines:
+        match = RECIPE_RE.search(line)
+        if match:
+            recipe = match.group(1)
+    return recipe
+
+
 def clean(text):
     return " ".join(text.split())
 
 
-def is_interesting(line):
-    text = line.strip()
-    if not text or len(text) > 800 or NOISE_RE.search(text):
-        return False
-    return bool(ERROR_RE.search(text))
-
-
-def excerpt_from(lines):
-    """The block of log that explains the failure.
-
-    Priority: the region after Buildozer's own failure banner -> the last
-    error-looking lines -> the plain tail of the log.
-    """
-    anchor = None
-    for index in range(len(lines) - 1, -1, -1):
-        if any(marker in lines[index] for marker in FAILURE_MARKERS):
-            anchor = index
+def publish_annotations(block, lines):
+    """The decisive lines only -- the runner keeps ~10 annotations per job."""
+    candidates = [
+        clean(line) for line in lines
+        if line.strip() and not is_cut(line)
+        and (SIGNAL_RE.search(line) or STRONG_RE.search(line)) and len(line) < 500
+    ]
+    picked = []
+    for text in reversed(candidates):
+        if text not in picked:
+            picked.append(text)
+        if len(picked) >= ANNOTATION_LINES:
             break
-
-    if anchor is not None:
-        start = max(0, anchor - 45)
-        block = [line for line in lines[start:anchor + 40] if line.strip()]
-        block = [line for line in block if not NOISE_RE.search(line)]
-        if block:
-            return block[-90:]
-
-    hits = [i for i, line in enumerate(lines) if is_interesting(line)]
-    if hits:
-        keep, ranges, start, prev = set(), [], hits[0], hits[0]
-        keep.update(range(max(0, hits[0] - 3), min(len(lines), hits[0] + 1)))
-        for index in hits[1:]:
-            if index - prev > 4:
-                ranges.append((start, prev))
-                start = index
-            keep.update(range(max(0, index - 3), min(len(lines), index + 1)))
-            prev = index
-        ranges.append((start, prev))
-        blocks, total = [], 0
-        for first, last in reversed(ranges):
-            block = [lines[i] for i in range(first, last + 1) if lines[i].strip()]
-            blocks.append(block)
-            total += sum(len(line) + 1 for line in block)
-            if total > MAX_SUMMARY_CHARS // 3:
-                break
-        blocks.reverse()
-        flat = [line for block in blocks for line in block]
-        if flat:
-            return flat[-90:]
-
-    return [line for line in lines[-TAIL_FALLBACK_LINES:] if line.strip()]
+    if not picked:
+        picked = [clean(line) for line in block[-ANNOTATION_LINES:]]
+    packed = " | ".join(picked)[:MAX_ANNOTATION_CHARS]
+    if packed:
+        safe = packed.replace("%", "%25").replace("\r", "%0D")
+        print(f"::error::{safe}")
 
 
 def api(path, payload, token):
@@ -209,21 +254,6 @@ def publish_pr_comment(summary):
     )
 
 
-def publish_annotations(block):
-    """The decisive lines only -- the runner keeps ~10 annotations per job."""
-    picked = []
-    for line in reversed(block):
-        text = clean(line)
-        if text and text not in picked:
-            picked.append(text)
-        if len(picked) >= ANNOTATION_LINES:
-            break
-    packed = " | ".join(picked)[:MAX_ANNOTATION_CHARS]
-    if packed:
-        safe = packed.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-        print(f"::error::{safe}")
-
-
 def main():
     logs = log_candidates()
     if not logs:
@@ -234,10 +264,12 @@ def main():
         )
         return 0
 
-    block, chosen = [], logs[0]
+    block, chosen, recipe, signals_lines = [], logs[0], None, []
     for log in logs[:3]:
         try:
-            block = excerpt_from(read_lines(log))
+            raw = read_lines(log)
+            block, recipe = excerpt_from(raw)
+            signals_lines = raw
         except Exception as exc:  # noqa: BLE001
             print(f"::warning::Could not read {log}: {exc}")
             continue
@@ -248,7 +280,8 @@ def main():
     if not block:
         block = [f"(no readable content in {chosen})"]
 
-    title = f"Buildozer failed - excerpt from {chosen} ({os.path.getsize(chosen)} bytes)"
+    where = f" while building recipe `{recipe}`" if recipe else ""
+    title = f"Buildozer failed{where} - excerpt from {chosen} ({os.path.getsize(chosen)} bytes)"
     fenced = "```\n" + "\n".join(block) + "\n```"
     summary = (
         f"## {title}\n\n{fenced}\n\n"
@@ -256,22 +289,19 @@ def main():
         "`Build debug APK with Buildozer`, or the `build-log` artifact._"
     )
 
-    print(f"=== excerpt from {chosen} ===")
+    print(f"=== excerpt from {chosen} ({len(block)} lines) ===")
     print("\n".join(block))
     print("=== end of excerpt ===")
 
-    publish_annotations(block)
+    publish_annotations(block, signals_lines or block)
 
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(summary + "\n")
 
-    results = [
-        f"check run: {publish_check_run(title, summary)}",
-        f"PR comment: {publish_pr_comment(summary)}",
-    ]
-    for line in results:
+    for line in (f"check run: {publish_check_run(title, summary)}",
+                 f"PR comment: {publish_pr_comment(summary)}"):
         print(line)
         print(f"::notice::{clean(line)}")
     return 0
