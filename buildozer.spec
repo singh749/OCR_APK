@@ -58,7 +58,16 @@ android.archs = arm64-v8a
 
 android.accept_sdk_license = True
 
-android.permissions = CAMERA,INTERNET,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE
+# CAMERA is declared for a future in-app viewfinder; the "Camera" button itself
+# only needs it indirectly, because it hands the job to the system camera app
+# through an intent. Storage permissions are capped with maxSdkVersion so they
+# apply to old devices only: on Android 10+ the app writes/reads its photos
+# through MediaStore content URIs, which need no permission at all (and a
+# file:// path would be rejected outright by the camera app).
+# One line on purpose: buildozer splits this list on commas itself and has
+# no line-continuation syntax, so a backslash would end up inside a permission
+# name and quietly produce a broken <uses-permission> entry.
+android.permissions = CAMERA, INTERNET, (name=android.permission.READ_EXTERNAL_STORAGE;maxSdkVersion=32), (name=android.permission.WRITE_EXTERNAL_STORAGE;maxSdkVersion=28)
 
 orientation = portrait
 fullscreen = 0
