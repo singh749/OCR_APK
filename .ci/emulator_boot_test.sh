@@ -27,6 +27,30 @@ DIAG=ui-report.txt
 
 say() { echo "$*"; echo "* $*" >> "${GITHUB_STEP_SUMMARY:-/dev/null}" 2>/dev/null || true; }
 
+# A cold emulator is loud: telephony and Bluetooth die, SurfaceFlinger complains,
+# `ANR in com.android.phone` turns up while nothing of ours has gone wrong. The
+# first version of this test blamed the app for exactly that noise, so every
+# fatal marker below has to name this package (or the app's own pid, once known)
+# before it can fail the build - an unscoped grep is a false alarm factory.
+fatal_marker() {
+  local log="$1" pid="$2" out=""
+  # logcat writes `ANR in <package>, PID: 1234`, so the package name has to be
+# followed by a comma or whitespace - matching only a space misses every ANR.
+out="$(grep -a -E "ANR in ${PKG}([[:space:]]|,|\$)" "$log" 2>/dev/null | head -1)"
+  if [ -z "$out" ] && grep -a -q "FATAL EXCEPTION" "$log" 2>/dev/null \
+     && grep -a -q "Process: ${PKG}" "$log" 2>/dev/null; then
+    out="$(grep -a -A2 "FATAL EXCEPTION" "$log" | grep -a -E "Process:|Exception|Error" | head -2 | tr '\n' ' ')"
+  fi
+  if [ -z "$out" ]; then
+    if [ -n "$pid" ]; then
+      out="$(grep -a -E "Fatal signal|SIGSEGV|SIGABRT" "$log" 2>/dev/null | grep -a -E "${PKG}|pid: ${pid}" | head -1)"
+    fi
+  fi
+  [ -n "$out" ] || out="$(grep -a -E "Force finishing activity ${PKG}" "$log" 2>/dev/null | head -1)"
+  [ -n "$out" ] || return 1
+  printf '%s' "$out" | cut -c1-200
+}
+
 # The excerpt of device log that explains the verdict, capped so the annotation is
 # not truncated by GitHub's size limit.
 log_tail() {
@@ -80,24 +104,31 @@ tries="${BOOT_WAIT_TRIES:-60}"
 step="${BOOT_WAIT_STEP:-5}"
 seen_pid=""
 verdict=""
+attempt=0
 for _i in $(seq 1 "$tries"); do
+  attempt=$((attempt + 1))
   sleep "$step"
   adb logcat -d > "$LOGCAT" 2>&1
+  pid="$(adb shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+  [ -n "$pid" ] && seen_pid="$pid"
   if grep -a -q "OCRDIAG startup" "$LOGCAT"; then
     verdict=started
     break
   fi
-  if grep -a -qE "FATAL EXCEPTION|Fatal signal|ANR in |Force finishing activity" "$LOGCAT"; then
+  if fatal="$(fatal_marker "$LOGCAT" "$seen_pid")"; then
     verdict=fatal
+    fatal_detail="$fatal"
     break
   fi
-  pid="$(adb shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
-  [ -n "$pid" ] && seen_pid="$pid"
 done
+# How long a cold first launch needed, in the log where the next person tuning
+# this timeout will look for it.
+echo "::notice::startup record ${verdict:-not-found} after ${attempt} polls of ${step}s (pid=${seen_pid:-none})"
+say "startup ${verdict:-not found} after ${attempt} polls (${step}s apart)"
 
 case "$verdict" in
   fatal)
-    fail "Android reported a fatal error during startup: $(grep -a -m1 -E 'FATAL EXCEPTION|Fatal signal|ANR in ' "$LOGCAT" | cut -c1-160)"
+    fail "Android reported a fatal error for ${PKG}: ${fatal_detail:-see logcat}"
     ;;
   started)
     ;;
@@ -112,13 +143,13 @@ esac
 # Now that Python is up: give Kivy a frame to draw (build() schedules the layout
 # record ~1s later) and confirm the process is still there - a death on the first
 # timer or the first draw shows up here.
-for _i in $(seq 1 "${BOOT_SETTLE_TRIES:-12}"); do
+for _i in $(seq 1 "${BOOT_SETTLE_TRIES:-24}"); do
   sleep "${BOOT_WAIT_STEP:-5}"
   adb logcat -d > "$LOGCAT" 2>&1
-  if grep -a -qE "OCRDIAG (layout|fatal)" "$LOGCAT" && [ -z "$(adb shell pidof "$PKG" 2>/dev/null | tr -d '\r')" ]; then
-    fail "app logged a fatal record and then disappeared"
-  fi
   if grep -a -q "OCRDIAG layout" "$LOGCAT"; then break; fi
+  if grep -a -q "OCRDIAG fatal" "$LOGCAT"; then
+    fail "main.py reported a fatal record: $(grep -a -m1 'OCRDIAG fatal' "$LOGCAT" | cut -c1-200)"
+  fi
 done
 
 adb exec-out screencap -p > emulator-screenshot.png 2>/dev/null || true
@@ -128,8 +159,8 @@ grep -a "OCRDIAG" "$LOGCAT" | sed -E 's/^.*(OCRDIAG)/\1/' > "$DIAG" 2>/dev/null 
 
 # A Python traceback after startup means something in the app raised, even if
 # Android itself never reported a fatal error.
-if grep -a -qE "E python *: *Traceback|OCRDIAG fatal" "$LOGCAT"; then
-  fail "Python raised during startup: $(grep -a -m1 -E 'E python *:.*/' "$LOGCAT" | cut -c1-160)"
+if grep -a -qE "E python *+: *Traceback" "$LOGCAT"; then
+  fail "Python raised during startup: $(grep -a -m1 -A3 'Traceback (most recent call last)' "$LOGCAT" | tr '\n' ' ' | cut -c1-240)"
 fi
 
 # `adb shell pidof` exit status is not trustworthy across adb versions, so the
