@@ -73,18 +73,32 @@ jobs:
       - name: Build debug APK with Buildozer
         # First run downloads the Android SDK + NDK and cross-compiles
         # CPython, Kivy, numpy, Pillow and OpenCV: expect roughly 30-45 min.
-        run: buildozer --verbose android debug
-
-      - name: Attach build logs on failure
-        # Without this a red "X" tells you nothing; the real error is in these logs.
-        if: failure()
+        # `tee build.log` keeps a copy of the output on disk: buildozer's
+        # chatter is tens of thousands of lines and the real error is buried
+        # in it, so the report step below needs a file to grep.
         run: |
-          echo "===== buildozer.log ====="
-          tail -n 400 buildozer.log 2>/dev/null || echo "(no buildozer.log)"
-          echo "===== p4a build.log ====="
-          find .buildozer -name 'build.log' -o -name '*.log' | head -n 5 | while read -r f; do
-            echo "----- $f -----"; tail -n 200 "$f"; done
-          exit 1
+          set -o pipefail
+          buildozer --verbose android debug 2>&1 | tee build.log
+
+      - name: Report the failure (annotations + PR comment + artifact)
+        # Without this a red "X" tells you nothing. The script reads the logs,
+        # raises `::error::` annotations for the meaningful lines, writes a
+        # step summary and comments on the open PR. It always exits 0.
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python .ci/ci_failure_report.py
+
+      - name: Upload the build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-log
+          path: |
+            build.log
+            buildozer.log
+          if-no-files-found: ignore
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v7

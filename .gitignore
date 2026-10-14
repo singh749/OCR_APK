@@ -22,3 +22,6 @@ buildozer.log
 .DS_Store
 .idea/
 .vscode/
+
+# CI log capture (.github/workflows/build-apk.yml)
+build.log
