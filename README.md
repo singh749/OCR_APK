@@ -9,6 +9,12 @@ OCR engine, and keeps a local scan history in SQLite.
 * Android packaging: `buildozer.spec`
 * CI build: `.github/workflows/build-apk.yml`
 
+**Current status:** the pipeline builds green — run
+[38575116951](https://github.com/singh749/OCR_APK/actions/runs/38575116951)
+produced `OCR-Scanner-APK` (~42 MB, `arm64-v8a` debug APK) in 30 min. Getting
+there meant fixing ten separate errors, listed below; each one was visible only
+after the previous one was gone.
+
 ---
 
 ## Android APK from GitHub Actions
@@ -55,7 +61,7 @@ python main.py
 
 ---
 
-## Why the workflow used to fail (all 7 runs failed the same way)
+## Why the workflow used to fail (10 errors, found one at a time)
 
 | # | Error in Actions | Cause / fix |
 |---|---|---|
