@@ -2,14 +2,19 @@
 """Publish a readable failure report for a broken Buildozer CI run.
 
 A red GitHub Actions "X" normally tells you nothing: the real error is buried
-tens of thousands of lines deep in buildozer's log, and the raw log endpoint is
-not always reachable for everybody. This script therefore
+tens of thousands of lines deep in the Buildozer log. This script
 
-  1. finds the interesting lines in the build logs,
-  2. publishes them as workflow annotations (shown inline on the run page and
-     readable through the checks API),
-  3. writes them to the job step summary,
-  4. posts them as a comment on the open pull request (if there is one).
+  1. finds the lines that actually explain the failure (the log region around
+     Buildozer's own "the last command failed" marker, falling back to the
+     tail of the log),
+  2. publishes them where they can be read:
+       * a dedicated check run ("Build log excerpt") whose output.summary is
+         plain API-readable text -- check runs are the only channel that both
+         humans and the REST API expose in full,
+       * `::error::` annotations (a runner only keeps ~10 per job, so this is
+         deliberately limited to the most decisive lines),
+       * the job step summary,
+       * a comment on the open pull request, if there is one.
 
 It must never break the build itself, so every path exits 0.
 """
@@ -21,30 +26,45 @@ import sys
 import urllib.error
 import urllib.request
 
-MAX_ANNOTATIONS = 12
-ANNOTATION_LEN = 800
-MAX_EXCERPT_CHARS = 18000
-CONTEXT_LINES = 3          # lines of context kept before an error line
-CONTEXT_AFTER = 1          # lines of context kept after an error line
-GAP_TOLERANCE = 4          # nearby hits are merged into one readable block
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
-ERROR_PATTERNS = re.compile(
-    r"(?:\berror\b|\bERROR\b|Error:|fatal:|Traceback|Critical error|"
-    r"Buildozer failed|Error running command|Could NOT find|No such file or directory|"
-    r"not found|No recipe named|Couldn't find|undefined reference|undeclared identifier|"
+# Buildozer prints its own banner when a recipe's build command dies; the lines
+# right after it are the failing command and its output.
+FAILURE_MARKERS = (
+    "Buildozer failed to execute the last command",
+    "Error running command",
+    "ERROR: Should have a quantum",
+    "Build Interrupting Exception",
+    "BuildInterruptingException",
+    "ERROR: Please",
+    "No recipe named",
+    "Couldn't find the",
+    "ERROR: ",
+)
+
+ERROR_RE = re.compile(
+    r"(\berror\b|Error:|fatal:|Traceback|Critical error|Could NOT find|"
+    r"No such file or directory|undefined reference|undeclared identifier|"
     r"command failed|exit code|cannot execute|Permission denied|"
-    r"ERROR: please|RequirementNotFound|BuildInterruptingException)",
+    r"RequirementNotFound|BuildInterruptingException)",
     re.IGNORECASE,
 )
 
-IGNORE_PATTERNS = re.compile(
-    r"(?:^\s*(?:[0-9]+\s+)?(?:warning|note):|deprecated|-Wno-error|"
-    r"Downloading|Progress \[|Receiving objects|^remote:)",
+# Compiler warnings are noise here: they flood the log and they also steal the
+# runner's ~10 annotation slots (they contain the word "error").
+NOISE_RE = re.compile(
+    r"(warning:|\bnote:|to allow an error code|^\s*\d+\.\s|deprecated|"
+    r"^remote:|Resolving |^Receiving |^Counting |^Compressing |Unpacking objects)",
     re.IGNORECASE,
 )
 
+MAX_SUMMARY_CHARS = 60000
+MAX_ANNOTATION_CHARS = 1000
+ANNOTATION_LINES = 6
+TAIL_FALLBACK_LINES = 60
 
-def candidate_logs():
+
+def log_candidates():
     """Every log file that could contain the error, biggest (most complete) first."""
     found, seen = [], set()
 
@@ -63,169 +83,197 @@ def candidate_logs():
         for name in files:
             if name.endswith(".log"):
                 add(os.path.join(root, name))
-    add(os.path.expanduser("~/.buildozer/android/platform/build-arm64-v8a/build.log"))
     found.sort(key=lambda p: -os.path.getsize(p))
     return found
 
 
-def read_lines(path, limit_bytes=40 * 1024 * 1024):
+def read_lines(path, limit_bytes=48 * 1024 * 1024):
     with open(path, "rb") as handle:
         handle.seek(0, os.SEEK_END)
         size = handle.tell()
         handle.seek(max(0, size - limit_bytes))
         chunk = handle.read().decode("utf-8", "replace")
-    return chunk.splitlines()
+    return [ANSI_RE.sub("", line).rstrip() for line in chunk.splitlines()]
+
+
+def clean(text):
+    return " ".join(text.split())
+
+
+def is_interesting(line):
+    text = line.strip()
+    if not text or len(text) > 800 or NOISE_RE.search(text):
+        return False
+    return bool(ERROR_RE.search(text))
 
 
 def excerpt_from(lines):
-    """Error-looking lines plus their context, merged into contiguous blocks.
+    """The block of log that explains the failure.
 
-    Blocks are collected from the end of the log backwards (the tail holds the
-    command that actually failed) until the character budget is used up.
+    Priority: the region after Buildozer's own failure banner -> the last
+    error-looking lines -> the plain tail of the log.
     """
-    keep = set()
-    for index, line in enumerate(lines):
-        text = line.strip()
-        if not text or len(text) > 1000:
-            continue
-        if not ERROR_PATTERNS.search(text) or IGNORE_PATTERNS.search(text):
-            continue
-        keep.update(
-            range(
-                max(0, index - CONTEXT_LINES),
-                min(len(lines), index + 1 + CONTEXT_AFTER),
-            )
-        )
-    if not keep:
-        return []
-
-    ordered = sorted(keep)
-    ranges, start, previous = [], ordered[0], ordered[0]
-    for index in ordered[1:]:
-        if index - previous > GAP_TOLERANCE:
-            ranges.append((start, previous))
-            start = index
-        previous = index
-    ranges.append((start, previous))
-
-    blocks, total = [], 0
-    for first, last in reversed(ranges):
-        block = [lines[i].rstrip() for i in range(first, last + 1)]
-        blocks.append(block)
-        total += sum(len(line) + 1 for line in block)
-        if total > MAX_EXCERPT_CHARS:
+    anchor = None
+    for index in range(len(lines) - 1, -1, -1):
+        if any(marker in lines[index] for marker in FAILURE_MARKERS):
+            anchor = index
             break
-    blocks.reverse()
-    return [line for block in blocks for line in block]
+
+    if anchor is not None:
+        start = max(0, anchor - 45)
+        block = [line for line in lines[start:anchor + 40] if line.strip()]
+        block = [line for line in block if not NOISE_RE.search(line)]
+        if block:
+            return block[-90:]
+
+    hits = [i for i, line in enumerate(lines) if is_interesting(line)]
+    if hits:
+        keep, ranges, start, prev = set(), [], hits[0], hits[0]
+        keep.update(range(max(0, hits[0] - 3), min(len(lines), hits[0] + 1)))
+        for index in hits[1:]:
+            if index - prev > 4:
+                ranges.append((start, prev))
+                start = index
+            keep.update(range(max(0, index - 3), min(len(lines), index + 1)))
+            prev = index
+        ranges.append((start, prev))
+        blocks, total = [], 0
+        for first, last in reversed(ranges):
+            block = [lines[i] for i in range(first, last + 1) if lines[i].strip()]
+            blocks.append(block)
+            total += sum(len(line) + 1 for line in block)
+            if total > MAX_SUMMARY_CHARS // 3:
+                break
+        blocks.reverse()
+        flat = [line for block in blocks for line in block]
+        if flat:
+            return flat[-90:]
+
+    return [line for line in lines[-TAIL_FALLBACK_LINES:] if line.strip()]
 
 
-def error_lines(block):
-    out, seen = [], set()
-    for line in block:
-        text = " ".join(line.split())
-        if not text or text in seen:
-            continue
-        if ERROR_PATTERNS.search(text) and not IGNORE_PATTERNS.search(text):
-            seen.add(text)
-            out.append(text[:ANNOTATION_LEN])
-    return out or [block[-1].strip()[:ANNOTATION_LEN]]
-
-
-def emit_annotations(block):
-    """`::error::` lines -> GitHub annotations on the run page (and via the API)."""
-    for line in error_lines(block)[:MAX_ANNOTATIONS]:
-        safe = line.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-        print(f"::error::{safe}")
-
-
-def write_step_summary(log_path, block, extra):
-    path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if not path:
-        return
-    body = [
-        "## Build log excerpt",
-        "",
-        f"Source: `{log_path}` ({extra})",
-        "",
-        "```",
-        *block[-400:],
-        "```",
-    ]
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write("\n".join(body) + "\n")
-
-
-def post_pr_comment(text):
-    token = os.environ.get("GITHUB_TOKEN")
-    repo = os.environ.get("GITHUB_REPOSITORY")
-    pr = os.environ.get("PR_NUMBER", "")
-    if not (token and repo and pr):
-        return "skipped (no GITHUB_TOKEN/GITHUB_REPOSITORY/PR_NUMBER)"
-    url = f"https://api.github.com/repos/{repo}/issues/{pr}/comments"
+def api(path, payload, token):
     request = urllib.request.Request(
-        url,
-        data=json.dumps({"body": text}).encode(),
+        f"https://api.github.com{path}",
+        data=json.dumps(payload).encode(),
         headers={
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
-            "User-Agent": "ci-failure-report",
+            "User-Agent": "buildozer-ci-failure-report",
             "X-GitHub-Api-Version": "2022-11-28",
         },
         method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return f"posted ({response.status})"
+            return f"ok ({response.status})"
     except urllib.error.HTTPError as exc:
-        return f"failed ({exc.code}: {exc.read()[:200].decode('utf-8', 'replace')})"
+        return f"failed ({exc.code}: {exc.read()[:160].decode('utf-8', 'replace')})"
     except Exception as exc:  # noqa: BLE001 - diagnostics must never break CI
         return f"failed ({exc})"
 
 
+def publish_check_run(title, summary):
+    token = os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    sha = os.environ.get("HEAD_SHA") or os.environ.get("GITHUB_SHA")
+    if not (token and repo and sha):
+        return "skipped (missing GITHUB_TOKEN/GITHUB_REPOSITORY/HEAD_SHA)"
+    return api(
+        f"/repos/{repo}/check-runs",
+        {
+            "name": "Build log excerpt",
+            "head_sha": sha,
+            "status": "completed",
+            "conclusion": "failure",
+            "output": {
+                "title": title[:255],
+                "summary": summary[:MAX_SUMMARY_CHARS],
+                "text": summary[:MAX_SUMMARY_CHARS],
+            },
+        },
+        token,
+    )
+
+
+def publish_pr_comment(summary):
+    token = os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    pr = os.environ.get("PR_NUMBER", "")
+    if not (token and repo and pr):
+        return "skipped (not a pull_request event, or no token)"
+    return api(
+        f"/repos/{repo}/issues/{pr}/comments",
+        {"body": f"### Build Android APK failed\n\n{summary[:MAX_SUMMARY_CHARS]}"},
+        token,
+    )
+
+
+def publish_annotations(block):
+    """The decisive lines only -- the runner keeps ~10 annotations per job."""
+    picked = []
+    for line in reversed(block):
+        text = clean(line)
+        if text and text not in picked:
+            picked.append(text)
+        if len(picked) >= ANNOTATION_LINES:
+            break
+    packed = " | ".join(picked)[:MAX_ANNOTATION_CHARS]
+    if packed:
+        safe = packed.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::error::{safe}")
+
+
 def main():
-    logs = candidate_logs()
+    logs = log_candidates()
     if not logs:
-        print("::error::No build log found (.buildozer/**, build.log, buildozer.log)")
-        print("::error::Build log missing: nothing to excerpt")
-        post_pr_comment(
-            "### Build failed with no readable log\n\n"
-            "No `build.log` / `buildozer.log` was produced, so the build probably "
-            "died before Buildozer started. Open the run page and read the "
-            "`Build debug APK with Buildozer` step directly."
+        print("::error::No build log found (build.log / buildozer.log / .buildozer/**/*.log)")
+        publish_pr_comment(
+            "The build died before Buildozer produced a log. Open the run page and "
+            "read the `Build debug APK with Buildozer` step directly."
         )
         return 0
 
-    tail = []
-    chosen = logs[0]
+    block, chosen = [], logs[0]
     for log in logs[:3]:
         try:
-            tail = excerpt_from(read_lines(log))
+            block = excerpt_from(read_lines(log))
         except Exception as exc:  # noqa: BLE001
-            print(f"::error::Could not read {log}: {exc}")
+            print(f"::warning::Could not read {log}: {exc}")
             continue
-        if tail:
+        if block:
             chosen = log
             break
 
-    print(f"=== excerpt from {chosen} ({os.path.getsize(chosen)} bytes) ===")
-    for line in tail:
-        print(line)
-    print(f"=== end of excerpt ({len(tail)} lines) ===")
-    if not tail:
-        marker = f"::error::Log {chosen} had no recognizable error lines; see the step output"
-        print(marker)
-        tail = [f"(no error pattern matched in {chosen})"]
+    if not block:
+        block = [f"(no readable content in {chosen})"]
 
-    emit_annotations(tail)
-    write_step_summary(chosen, tail, f"{os.path.getsize(chosen)} bytes")
-
-    fenced = "\n".join(tail[-300:])
-    note = post_pr_comment(
-        "**Build Android APK failed.** Excerpt from `{}`:\n\n```\n{}\n```"
-        "\n\n_Full output: Actions → the failing run → `Build debug APK with "
-        "Buildozer`._".format(chosen, fenced[:MAX_EXCERPT_CHARS])
+    title = f"Buildozer failed - excerpt from {chosen} ({os.path.getsize(chosen)} bytes)"
+    fenced = "```\n" + "\n".join(block) + "\n```"
+    summary = (
+        f"## {title}\n\n{fenced}\n\n"
+        "_Complete output: Actions → the failing run → "
+        "`Build debug APK with Buildozer`, or the `build-log` artifact._"
     )
-    print(f"PR comment: {note}")
+
+    print(f"=== excerpt from {chosen} ===")
+    print("\n".join(block))
+    print("=== end of excerpt ===")
+
+    publish_annotations(block)
+
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if path:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(summary + "\n")
+
+    results = [
+        f"check run: {publish_check_run(title, summary)}",
+        f"PR comment: {publish_pr_comment(summary)}",
+    ]
+    for line in results:
+        print(line)
+        print(f"::notice::{clean(line)}")
     return 0
 
 

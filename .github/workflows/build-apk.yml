@@ -16,6 +16,14 @@ env:
   # p4a must never wait for keyboard input in CI (auto-yes instead of prompting)
   PYTHONFORANDROID_PREREQUISITES_INSTALL_INTERACTIVE: 0
 
+# Needed so the failure report can publish a check run ("Build log excerpt")
+# and comment on the pull request; the build itself only needs to read the code.
+permissions:
+  contents: read
+  checks: write
+  issues: write
+  pull-requests: write
+
 jobs:
   build-android:
     name: Build debug APK (Buildozer)
@@ -76,18 +84,25 @@ jobs:
         # `tee build.log` keeps a copy of the output on disk: buildozer's
         # chatter is tens of thousands of lines and the real error is buried
         # in it, so the report step below needs a file to grep.
+        # The sed filter only affects what is echoed to the console: the runner
+        # keeps ~10 annotations per job and otherwise thousands of harmless
+        # "warning:"/"error code to be returned" compiler lines steal them all.
         run: |
           set -o pipefail
-          buildozer --verbose android debug 2>&1 | tee build.log
+          buildozer --verbose android debug 2>&1 \
+            | tee build.log \
+            | sed -E '/warning:|[[:space:]]note:|to allow an error code/d'
 
-      - name: Report the failure (annotations + PR comment + artifact)
-        # Without this a red "X" tells you nothing. The script reads the logs,
-        # raises `::error::` annotations for the meaningful lines, writes a
-        # step summary and comments on the open PR. It always exits 0.
+      - name: Report the failure (check run + annotations + PR comment)
+        # Without this a red "X" tells you nothing. The script finds the log
+        # region that explains the failure and publishes it as a "Build log
+        # excerpt" check run, an annotation, the job summary and a PR comment.
+        # It always exits 0 so it never hides the real error.
         if: failure()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: python .ci/ci_failure_report.py
 
       - name: Upload the build log
