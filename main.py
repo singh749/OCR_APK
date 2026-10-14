@@ -413,6 +413,28 @@ class OCRScannerApp(App):
         except Exception:  # noqa: BLE001 - cosmetic only
             pass
 
+    def _force_layout_pass(self):
+        """Ask Kivy for the layout pass instead of waiting for a frame to deliver it.
+
+        `Layout` runs its pass through `Clock.create_trigger(self.do_layout, -1)`,
+        i.e. once per frame. On the CI emulator a frame takes ~45 s (EGL_emulation
+        reports `avg=45179.50ms`), so a report taken one second after build()
+        measures Kivy's un-laid-out 100x100 widget default and reads as a collapsed
+        layout. `do_layout()` is public, documented as directly callable, and pure
+        arithmetic - no drawing, no GL - so calling it makes the numbers below the
+        numbers the phone will actually use, on any device at any frame rate.
+        """
+        targets = [self.root]
+        screen = getattr(self.root, "current_screen", None)
+        if screen is not None:
+            targets.append(screen)
+            targets.extend(list(getattr(screen, "children", []) or [])[:1])
+        for widget in targets:
+            try:
+                widget.do_layout()
+            except Exception:  # noqa: BLE001 - a diagnostic must never break the app
+                pass
+
     #: how long to wait for the first layout pass: 40 x 0.25s = 10s of frames
     LAYOUT_REPORT_TRIES = 40
 
@@ -434,6 +456,7 @@ class OCRScannerApp(App):
         """
         tries = getattr(self, "_layout_tries", 0) + 1
         self._layout_tries = tries
+        self._force_layout_pass()
         parts = []
         window = laid_out = None
         screen = None
@@ -452,6 +475,18 @@ class OCRScannerApp(App):
                     parts.append("screen={}".format(screen.name or "?"))
                     laid_out = (abs(screen.width - self.root.width) <= 1
                                 and abs(screen.height - self.root.height) <= 1)
+                    # The rows live in the screen's content box, so that is what has
+                    # to have been resized - a Screen can match the manager while its
+                    # own children are still at Kivy's defaults, which is precisely
+                    # the half-measure that made a green run print `preview=26x0`.
+                    if laid_out and getattr(screen, "children", None):
+                        content = screen.children[0]
+                        hint = getattr(content, "size_hint", (None, None))
+                        if hint and hint[0]:
+                            laid_out = (abs(content.width - screen.width) <= 1
+                                        and abs(content.height - screen.height) <= 1)
+                            parts.append("content={}x{}".format(int(content.width),
+                                                                int(content.height)))
                     for key, name in (("preview_box", "preview"), ("scan_btn", "scanbtn"),
                                       ("result_number", "result")):
                         widget = screen.ids.get(key) if hasattr(screen.ids, "get") else None
