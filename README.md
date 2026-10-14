@@ -140,7 +140,8 @@ launches it and asserts on logcat (`.ci/emulator_boot_test.sh`):
 | at least one `OCRDIAG` record at all | `build()` never finished, i.e. Python died very early |
 
 The records come from `main.py`'s `log_diag()`: `OCRDIAG startup ...`, `OCRDIAG problem ...`,
-`OCRDIAG layout window=... preview=...`, `OCRDIAG fatal ...`. On a real phone the same lines
+`OCRDIAG layout window=... preview=...`, `OCRDIAG fatal ...`, and
+`OCRDIAG engine method=... alts=...` after each scan (which engine answered). On a real phone the same lines
 are the whole diagnosis:
 
 ```
@@ -204,29 +205,49 @@ stays whole, the first becomes `U6234`.
 * If a button ever shows the red dialog, tap **Copy** and paste it into an issue - that text
   is the actual cause, which a crash on the phone never shows you.
 
-## OCR engine on Android — read this
+## OCR engine on Android
 
-`ocr_engine.py` prefers **EasyOCR** and falls back to **pytesseract**; both are
-*desktop* engines (PyTorch and the `tesseract` binary cannot be packaged by
-python-for-android). On the phone neither is importable, so the scan reports
-**“No OCR engine on this device”** instead of crashing.
+The phone reads numbers with **Google ML Kit Text Recognition v2**, bundled in the
+APK. `buildozer.spec` carries the whole wiring:
 
-The OpenCV preprocessing (Laplacian sharpening, CLAHE, gamma, illumination
-normalisation) does run on Android and is what makes engraved text readable.
-To get real on-device recognition, pick one:
+```
+android.gradle_dependencies = com.google.mlkit:text-recognition:16.0.0
+```
 
-* **Google ML Kit Text Recognition** — recommended. Add to `buildozer.spec`:
-  `android.gradle_dependencies = com.google.mlkit:text-recognition:16.0.1`
-  and call it from `ocr_engine.py` through `pyjnius` (`autoclass`). Android
-  Studio-compatible Gradle deps are handled by p4a, androidx is already
-  auto-enabled for target API > 28.
-* **Tesseract mobile (`com.rmtheis:tess-two` or `mlkit`-style wrapper)** via the
-  same `pyjnius` route, plus the `eng.traineddata` asset.
-* Bundle a small ONNX/TFLite recognizer and run it through OpenCV's `dnn`
-  module (`opencv` already ships `libopencv_dnn.so` in the APK).
+python-for-android turns each entry into `implementation '<coordinate>'` in the
+generated `build.gradle`, whose template already declares `google()` and
+`mavenCentral()`, so there is no Gradle file to maintain and no extra repository
+to add. That artifact is the *bundled* variant — its POM pulls
+`text-recognition-bundled-common` — so the model is inside the APK: no network, no
+Play Services model download, works in a shed. AndroidX is required by ML Kit and
+is auto-enabled by p4a for target API > 28.
 
-Whichever you choose, keep the desktop engines as the `try/except` fallbacks they
-are today so the same code runs on PC and on the phone.
+`ocr_engine.read_with_mlkit()` is the call. Three things about it are deliberate:
+
+* Nothing Java is imported at module level, exactly as in `main.py`. `ANDROID`
+  plus a Context argument decide whether ML Kit is even attempted, so a desktop
+  run, a test run and an APK built without the Gradle line all take the same
+  quiet path: `read_with_mlkit()` returns `None` and EasyOCR/Tesseract answer
+  instead. A missing engine is a missing feature, never a crash.
+* `Tasks.await(...)` is fetched with `getattr(Tasks, "await")`, because `await` is
+  a reserved word in Python and `Tasks.await(x)` is a `SyntaxError`.
+* The result is flattened by *probing* for `getTextBlocks`/`getBlocks`/
+  `getRecognizedBlocks` and falling back to `Text.getText()`. Those getters moved
+  between ML Kit versions while `getText()` never has, so an ML Kit upgrade cannot
+  make the number disappear; per-line confidence is used when present and left
+  `None` (rendered as a flat mid-range score) when it is not. The Java `List` is
+  walked with `size()`/`get()` because pyjnius does not promise Python iteration.
+
+ML Kit recognises the whole photo and does its own dewarping, so the OpenCV
+variants (`preprocess_for_engraved`) are only run for the desktop engines — on a
+phone one recognisation pass is the fastest thing available. `Engine: ML Kit OCR`
+in the result panel and `OCRDIAG engine method=ML Kit` in logcat say which path
+answered; **“No OCR engine on this device”** now means the import of
+`ocr_engine` itself failed, not that a phone has no engine.
+
+`tests/test_ocr_pipeline.py` covers the Python side of all this with a stubbed
+`jnius` (`install_fake_jnius`), including the missing-bridge and
+Java-throws-on-the-device cases — the parts that used to be untestable.
 
 ## Notes on `requirements.txt`
 

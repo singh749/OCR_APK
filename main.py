@@ -707,7 +707,20 @@ class OCRScannerApp(App):
 
         def worker():
             try:
-                result = ocr_engine.extract_numbers(image_path)
+                # The activity doubles as the Context the on-device engine (ML Kit)
+                # needs. Looked up here, on this thread, rather than in a Java
+                # callback: a pyjnius proxy created and used on the same thread is
+                # the case that is known to be safe.
+                try:
+                    ocr_context = android_activity() if IS_ANDROID else None
+                except Exception as exc:  # noqa: BLE001 - only disables ML Kit
+                    Logger.error("OCRScanner: no activity for OCR: {}".format(exc))
+                    ocr_context = None
+                result = ocr_engine.extract_numbers(image_path, context=ocr_context)
+                # Readable in logcat and in `adb logcat | grep OCRDIAG`, so "which
+                # engine answered on this phone" is answerable without a rebuild.
+                log_diag("engine", "method={} alts={}".format(
+                    result.get("method", ""), len(result.get("alternatives") or [])))
                 Clock.schedule_once(lambda _dt: self._on_ocr_done(result), 0)
             except Exception as exc:
                 Logger.error("OCRScanner: OCR failed\n" + traceback.format_exc())

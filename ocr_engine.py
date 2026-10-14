@@ -18,6 +18,21 @@ except Exception:
     pytesseract = None
     HAS_TESSERACT = False
 
+import sys
+
+# --- ON-DEVICE ENGINE (Google ML Kit Text Recognition v2) ---
+# EasyOCR needs torch and Tesseract needs a native binary; neither can be
+# packaged by python-for-android, so on a phone this module used to find no
+# engine at all. ML Kit ships inside the APK (see `android.gradle_dependencies`
+# in buildozer.spec) and its latin model is bundled, so it reads a photo offline.
+#
+# Nothing Java is imported here: pyjnius is imported inside read_with_mlkit(),
+# the same rule main.py follows everywhere. `import android` is what populates
+# the classloader, so it has to happen at call time on the device - and on a
+# desktop, or in an APK built without the Gradle dependency, that import simply
+# fails and the engines above stay in charge instead of killing the app.
+ANDROID = sys.platform.startswith("android")
+
 def preprocess_for_engraved(image_path):
     """Specialized preprocessing for engraved/stamped metal serial numbers"""
     img = cv2.imread(image_path)
@@ -179,40 +194,228 @@ def _tesseract_confidence(image, text):
 # =====================================================
 # MAIN OCR EXTRACTION
 # =====================================================
-def extract_numbers(image_path):
+def _mlkit_client(TextRecognition, Options):
+    """Build ML Kit's recognizer, whichever factory shape this version offers.
+
+    `TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)` is what the
+    current docs show; older releases had only `TextRecognizerOptions.Builder()`,
+    and a no-argument `getClient()` exists in some. Trying all three is free, and
+    it means an ML Kit version bump shows up as a log line on the next scan instead
+    of a scanner that reports nothing at all.
+    """
+    attempts = (
+        lambda: TextRecognition.getClient(Options.DEFAULT_OPTIONS),
+        lambda: TextRecognition.getClient(Options.Builder().build()),
+        lambda: TextRecognition.getClient(),
+    )
+    last_error = None
+    for attempt in attempts:
+        try:
+            return attempt()
+        except Exception as exc:  # noqa: BLE001 - AttributeError or a Java throw
+            last_error = exc
+    raise last_error
+
+
+def read_with_mlkit(image_path, context, max_wait_s=20):
+    """Read a photo with the phone's own OCR (ML Kit, bundled latin model).
+
+    Returns a list of `(text, confidence)` pairs - confidence is `None` when this
+    ML Kit build does not expose one - or `None` when the engine is not available
+    at all, which is how the caller knows to fall back.
+
+    `context` must be an Android Context (the activity main.py hands over); it is
+    `None` on desktop, which disables this path. Blocking is deliberate: callers
+    run this on the scan worker thread, never on the UI thread.
+    """
+    if not ANDROID or context is None:
+        return None
+    try:
+        import android  # noqa: F401  populates the classloader for pyjnius
+        from jnius import autoclass, JavaException
+    except Exception as exc:
+        print(f"[OCR] no Java bridge for ML Kit: {exc}")
+        return None
+
+    try:
+        File = autoclass("java.io.File")
+        Uri = autoclass("android.net.Uri")
+        InputImage = autoclass("com.google.mlkit.vision.text.InputImage")
+        TextRecognition = autoclass("com.google.mlkit.vision.text.TextRecognition")
+        Options = autoclass("com.google.mlkit.vision.text.latin.TextRecognizerOptions")
+        Tasks = autoclass("com.google.android.gms.tasks.Tasks")
+        TimeUnit = autoclass("java.util.concurrent.TimeUnit")
+    except Exception as exc:
+        # An APK built without android.gradle_dependencies lands here. It is a
+        # missing feature, not a crash: say so and let the other engines answer.
+        print(f"[OCR] ML Kit not in this build: {exc}")
+        return None
+
+    client = None
+    try:
+        image = InputImage.fromFilePath(context, Uri.fromFile(File(image_path)))
+        client = _mlkit_client(TextRecognition, Options)
+        # `Tasks.await` cannot be spelled out: `await` is a reserved word in
+        # Python, so `Tasks.await(...)` is a SyntaxError. getattr() takes the
+        # attribute by string, which the parser never touches.
+        await_task = getattr(Tasks, "await")
+        result = await_task(client.process(image), int(max_wait_s), TimeUnit.SECONDS)
+    except Exception as exc:
+        print(f"[OCR] ML Kit failed to read the photo: {exc}")
+        return None
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    try:
+        return _mlkit_lines(result)
+    except Exception as exc:
+        print(f"[OCR] ML Kit returned a result this build cannot read: {exc}")
+        return None
+
+
+def _mlkit_lines(result):
+    """Flatten ML Kit's block/line tree into [(text, confidence|None)].
+
+    The getters for the tree moved between ML Kit versions (getTextBlocks,
+    getBlocks, getRecognizedBlocks) while Text.getText() never has, so the tree is
+    probed for and the flat text is the guaranteed fallback - the number survives
+    either way. The list is walked with size()/get() rather than Python iteration,
+    which pyjnius does not promise for java.util.List.
+    """
+    blocks = None
+    for getter in ("getTextBlocks", "getBlocks", "getRecognizedBlocks"):
+        probe = getattr(result, getter, None)
+        if probe is None:
+            continue
+        try:
+            blocks = probe()
+        except Exception:
+            blocks = None
+        if blocks is not None:
+            break
+
+    lines = []
+    if blocks is not None:
+        for i in range(blocks.size()):
+            block = blocks.get(i)
+            block_lines = None
+            for getter in ("getLines", "getElements"):
+                probe = getattr(block, getter, None)
+                if probe is None:
+                    continue
+                try:
+                    block_lines = probe()
+                except Exception:
+                    block_lines = None
+                if block_lines is not None:
+                    break
+            if block_lines is None:
+                text = block.getText()
+                if text:
+                    lines.append((str(text), None))
+                continue
+            for j in range(block_lines.size()):
+                line = block_lines.get(j)
+                text = line.getText()
+                if not text:
+                    continue
+                confidence = None
+                get_conf = getattr(line, "getConfidence", None)
+                if get_conf is not None:
+                    try:
+                        value = get_conf()
+                        if value is not None:
+                            confidence = float(value)
+                    except Exception:
+                        confidence = None
+                lines.append((str(text), confidence))
+
+    if not lines:
+        text = result.getText() or ""
+        for chunk in re.split(r"\n+", str(text)):
+            chunk = chunk.strip()
+            if chunk:
+                lines.append((chunk, None))
+    return lines
+
+
+def extract_numbers(image_path, context=None):
     print(f"\n[OCR] Processing: {os.path.basename(image_path)}")
     result = {"best_text": "", "cleaned": "", "confidence": 0.0, "method": "", "alternatives": [], "all_results": {}}
     
-    try:
-        variants, original_img = preprocess_for_engraved(image_path)
-    except Exception as e:
-        print(f"[OCR] Preprocessing error: {e}")
-        return result
-
     # --- ENGINE SELECTION ---
-    if HAS_EASYOCR:
-        reader = _get_reader()
-        engine_name = "EasyOCR"
-    elif HAS_TESSERACT:
-        engine_name = "Tesseract"
+    # On a phone ML Kit *is* the engine: it is the only one that can be packaged
+    # into an APK, and it recognises the original photo itself (full resolution,
+    # its own EXIF handling and dewarping). So on a device the sharpened/gamma
+    # variants below are skipped instead of being produced and then ignored -
+    # a second or two of phone CPU for nothing - and "ML Kit found no text" is
+    # reported as an empty scan rather than retried through engines a phone cannot
+    # ship. On desktop read_with_mlkit() returns None and everything else is as it
+    # always was.
+    mlkit_lines = read_with_mlkit(image_path, context)
+    mlkit_used = False
+
+    if mlkit_lines is not None:
+        engine_name = "ML Kit"
+        variants, original_img = {"photo": None}, None
     else:
-        # No engine could be imported. This is the normal case inside the
-        # Android APK: python-for-android has no recipe for easyocr/torch or
-        # for the tesseract binary, so neither module can be packaged.
-        # See README.md ("OCR engine on Android") for the on-device options.
-        print(
-            "[OCR] No OCR engine available - install easyocr or pytesseract "
-            "for the desktop build; the Android APK needs an on-device engine."
-        )
-        result["method"] = "unavailable"
-        return result
+        if HAS_EASYOCR:
+            reader = _get_reader()
+            engine_name = "EasyOCR"
+        elif HAS_TESSERACT:
+            engine_name = "Tesseract"
+        else:
+            # No engine could be imported. On a device this means the build has no
+            # `android.gradle_dependencies` line for ML Kit, so the bridge had
+            # nothing to bind to; see README.md ("OCR engine on Android").
+            print(
+                "[OCR] No OCR engine available - install easyocr or pytesseract "
+                "for the desktop build; an Android APK needs ML Kit in the Gradle "
+                "dependencies (see android.gradle_dependencies in buildozer.spec)."
+            )
+            result["method"] = "unavailable"
+            return result
+
+        try:
+            variants, original_img = preprocess_for_engraved(image_path)
+        except Exception as e:
+            print(f"[OCR] Preprocessing error: {e}")
+            return result
 
     all_candidates = []
     summary_results = {}
 
     for method_name, proc_img in variants.items():
         try:
-            if engine_name == "EasyOCR":
+            if engine_name == "ML Kit":
+                # ML Kit reads the original photo (it wants the full resolution
+                # and applies EXIF itself), so the preprocessed variants are
+                # pointless here - recognising once is also the fastest thing to
+                # do on a phone.
+                if mlkit_used:
+                    continue
+                mlkit_used = True
+                texts, confs = [], []
+                for raw, conf_value in mlkit_lines:
+                    clean = re.sub(r'[^A-Z0-9]', '', strip_label_tokens(raw).upper())
+                    if not clean:
+                        continue
+                    # This ML Kit build may not expose a per-line confidence; a
+                    # recognised line is still worth scoring, so it gets a flat
+                    # mid-range value rather than 0 (which would rank below noise).
+                    conf_pct = (conf_value * 100.0) if conf_value is not None else 60.0
+                    texts.append(clean)
+                    confs.append(conf_pct)
+                    length_bonus = len(clean) * (25 if len(clean) >= 5 else 8)
+                    all_candidates.append({"clean": clean, "raw": raw, "conf": conf_pct, "score": length_bonus + conf_pct, "method": method_name})
+                avg_conf = (sum(confs) / len(confs)) if confs else 0.0
+                summary_results[method_name] = {"text": " ".join(texts), "confidence": round(avg_conf, 1)}
+
+            elif engine_name == "EasyOCR":
                 detections = reader.readtext(proc_img, detail=1, link_threshold=0.15, low_text=0.15, 
                                              text_threshold=0.25, allowlist='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')
                 texts, confs = [], []

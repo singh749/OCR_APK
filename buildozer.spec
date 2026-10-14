@@ -77,6 +77,20 @@ android.accept_sdk_license = True
 # reports are being chased.
 android.permissions = INTERNET
 
+# On-device OCR. python-for-android turns every entry here into an
+# `implementation '<coordinate>'` line in the generated build.gradle, and its
+# template already declares the `google()` repository, so this is the whole
+# wiring - no gradle file to maintain. `text-recognition` is ML Kit Text
+# Recognition v2 with the latin model *bundled* (its POM pulls
+# text-recognition-bundled-common), so it reads a photo with no network and no
+# Play Services model download, which is what a bill serial has to be scanned by
+# in a shed. Version 16.0.0 was checked against Google's Maven index.
+#
+# If a build ever fails to resolve this, the app is not dead: main.py only hands
+# an activity to the engine at scan time, and a missing class makes ocr_engine
+# print "ML Kit not in this build" and fall back to EasyOCR/Tesseract on desktop.
+android.gradle_dependencies = com.google.mlkit:text-recognition:16.0.0
+
 orientation = portrait
 fullscreen = 0
 
