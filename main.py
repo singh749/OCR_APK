@@ -35,8 +35,15 @@ from kivy.uix.label import Label
 from kivy.uix.popup import Popup
 from kivy.uix.screenmanager import FadeTransition, Screen, ScreenManager
 from kivy.uix.scrollview import ScrollView
-from kivy.uix.textinput import TextInput
 from kivy.utils import platform
+
+# `kivy.uix.textinput` is deliberately NOT imported here even though the search
+# field in main.kv is a TextInput: in Kivy 2.3.1 that module starts with
+# `from kivy.core.window import Window`, so importing it creates the window in the
+# middle of main.py's import - before the activity has finished attaching on some
+# phones, which is a class of "opens, then closes, with no traceback" that no
+# `try/except` can catch. Kivy's own order (App.run() -> EventLoop -> window) is
+# kept instead, and the kv rule resolves TextInput through the Factory at build().
 
 IS_ANDROID = platform == "android"
 
@@ -44,6 +51,10 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 KV_PATH = os.path.join(APP_DIR, "main.kv")
 TEMP_DIR = os.path.join(APP_DIR, "temp_images")
 STARTUP_ERROR_PATH = os.path.join(APP_DIR, "startup_error.txt")
+#: last startup milestone reached, flushed to disk on every step - see stage()
+STARTUP_TRACE_PATH = os.path.join(APP_DIR, "startup_trace.txt")
+_OCR_ENGINE = None
+_OCR_ENGINE_ERROR = None
 
 
 def log_diag(kind, detail):
@@ -62,6 +73,39 @@ def log_diag(kind, detail):
     return line
 
 
+def stage(name, detail=""):
+    """Record how far the process got, in logcat *and* on disk.
+
+    A Python `try/except` cannot catch a native abort: if a shared object for this
+    ABI fails to load, or its initialiser crashes, the process is gone before any
+    handler runs. That is the difference between "the app crashed" and a fixable
+    bug report, so each startup milestone is appended and fsync'd to a file the app
+    itself reads back on the next launch and prints in its result panel. A person
+    with no adb and no cable can then say what the last stage was, which is the
+    only way a phone that CI cannot reach still produces an answer.
+    """
+    line = "{} {}".format(name, detail).strip()
+    log_diag("stage", line)
+    try:
+        with open(STARTUP_TRACE_PATH, "a", encoding="utf-8") as handle:
+            handle.write("{} {}\n".format(
+                datetime.now().isoformat(timespec="seconds"), line))
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:  # noqa: BLE001 - a breadcrumb must never become a crash
+        pass
+
+
+def previous_stages(limit=6):
+    """The tail of the *previous* launch's trace, before this one overwrites it."""
+    try:
+        with open(STARTUP_TRACE_PATH, "r", encoding="utf-8") as handle:
+            lines = [ln.strip() for ln in handle if ln.strip()]
+    except Exception:  # noqa: BLE001 - first run, or unreadable: no history
+        return []
+    return lines[-limit:]
+
+
 def write_startup_error(text):
     """Last-resort breadcrumb, in the app's own files dir (readable via adb)."""
     try:
@@ -72,14 +116,23 @@ def write_startup_error(text):
         pass
 
 # --- optional native / heavy modules ---------------------------------------
-# A missing one must degrade to a message, never to a crash.
+# A missing one must degrade to a message, never to a crash - and on a phone
+# "degrade" cannot mean "import it and hope", because importing cv2 or numpy can
+# abort the *process* (a bad or mismatched `.so` for that ABI, a failing
+# `dlopen`, a static initialiser that crashes). `try/except` does not see any of
+# that: no Python-level handler runs, the app just closes, and that is exactly the
+# "it crashes when I open it" report this file exists to answer.
+#
+# So nothing heavy is imported here. OpenCV is imported by the one function that
+# needs it (desktop webcam capture) and `ocr_engine` - which pulls numpy and
+# OpenCV in with it - is imported by the scan worker thread, off the UI thread,
+# the first time a scan is asked for. A phone that cannot load those libraries now
+# still opens, shows its screen, and reports the missing engine in text.
+#
+# sqlite3 stays at module scope on purpose: `libsqlite3.so` is small, it is a
+# python-for-android core recipe rather than a ported wheel, and history is the
+# first thing the user comes back to look at.
 PROBLEMS = []
-
-try:
-    import cv2
-except Exception as exc:  # pragma: no cover - depends on the device
-    cv2 = None
-    PROBLEMS.append(("OpenCV (cv2)", exc))
 
 try:
     import database
@@ -87,11 +140,56 @@ except Exception as exc:
     database = None
     PROBLEMS.append(("scan history database", exc))
 
+
+#: the previous launch's milestones, read before this run truncates the file
+_PREVIOUS_STAGES = previous_stages()
 try:
-    import ocr_engine
-except Exception as exc:
-    ocr_engine = None
-    PROBLEMS.append(("ocr_engine", exc))
+    with open(STARTUP_TRACE_PATH, "w", encoding="utf-8"):
+        pass
+except Exception:  # noqa: BLE001 - unwritable dir only costs the breadcrumb
+    pass
+
+
+def startup_stall_report():
+    """What the last launch was doing when it stopped, or '' if it got to `ready`.
+
+    Empty is the normal case. A non-empty answer means the previous process never
+    reached the end of startup, which on a phone is the difference between a
+    report of "it crashes" and a line naming where - and it needs no adb, no cable
+    and no logcat, because it is written to the app's own directory and shown in the
+    result panel on the next open.
+    """
+    if not _PREVIOUS_STAGES:
+        return ""
+    for line in _PREVIOUS_STAGES:
+        if line.split(" ", 1)[-1].startswith("ready"):
+            return ""
+    return _PREVIOUS_STAGES[-1].split(" ", 1)[-1]
+
+
+def ocr_engine_module():
+    """Import the OCR pipeline on first use. Returns the module or raises.
+
+    The failure is remembered, not retried: once it has raised, every later scan
+    reports the same reason in one line instead of trying to load a broken `.so`
+    again on the UI thread.
+    """
+    global _OCR_ENGINE, _OCR_ENGINE_ERROR
+    if _OCR_ENGINE is None and _OCR_ENGINE_ERROR is None:
+        stage("ocr-import-begin", "numpy+cv2")
+        try:
+            import ocr_engine as module
+        except BaseException as exc:  # noqa: BLE001 - ImportError, OSError, ctypes
+            _OCR_ENGINE_ERROR = "{}: {}".format(type(exc).__name__, exc)
+            PROBLEMS.append(("ocr_engine", _OCR_ENGINE_ERROR))
+            stage("ocr-import-failed", _OCR_ENGINE_ERROR)
+        else:
+            _OCR_ENGINE = module
+            stage("ocr-imported")
+    if _OCR_ENGINE is None:
+        raise RuntimeError("The OCR library could not be loaded on this device - "
+                           + (_OCR_ENGINE_ERROR or "reason unknown"))
+    return _OCR_ENGINE
 
 def apply_desktop_window_size():
     """Give the desktop dev window a phone-ish shape.
@@ -367,6 +465,10 @@ class HistoryScreen(Screen):
 # App
 # ---------------------------------------------------------------------------
 class OCRScannerApp(App):
+    def on_start(self):
+        """The window is up and the main loop is running: that is `ready`."""
+        stage("ready", "platform={}".format(platform))
+
     def build(self):
         self.title = "OCR Number Scanner"
         apply_desktop_window_size()
@@ -379,11 +481,14 @@ class OCRScannerApp(App):
         self._flash_popup = None
         self._error_popup = None
 
+        stage("build-begin", "android" if IS_ANDROID else platform)
         try:
             Builder.load_file(KV_PATH)
+            stage("kv-loaded")
             self.root = ScreenManager(transition=FadeTransition(duration=0.25))
             self.root.add_widget(MainScreen(name='main'))
             self.root.add_widget(HistoryScreen(name='history'))
+            stage("screens-built", "kv={}".format(len(self.root.screens)))
             if PROBLEMS:
                 # Not a dialog, on purpose: a Popup - and least of all a TextInput,
                 # which pulls in Android's soft-input machinery - created during
@@ -395,6 +500,17 @@ class OCRScannerApp(App):
                 Clock.schedule_once(self._note_startup_problems, 0)
             log_diag("startup", "platform={} kv=loaded screens=2 problems={}".format(
                 platform, len(PROBLEMS)))
+            stage("startup-ok", "problems={}".format(len(PROBLEMS)))
+            stalled = startup_stall_report()
+            if stalled:
+                # Say it out loud, on the screen the user is already looking at.
+                log_diag("stalled", stalled)
+                try:
+                    label = self.root.get_screen('main').ids.engine_label
+                    label.text = "Last run stopped at: {}".format(stalled)
+                    label.color = (0.95, 0.75, 0.3, 1)
+                except Exception:  # noqa: BLE001 - cosmetic
+                    pass
             Clock.schedule_once(self._report_layout, 1.0)
             # Optional, CI-only: if the launch intent names an image, scan it once
             # the UI exists. That is how "reads the number" gets verified on an
@@ -403,6 +519,7 @@ class OCRScannerApp(App):
             return self.root
         except Exception:  # noqa: BLE001 - startup must always produce a screen
             tb = traceback.format_exc()
+            stage("build-failed", tb.strip().splitlines()[-1][:160])
             Logger.error("OCRScanner: startup failed\n" + tb)
             log_diag("fatal", "build() raised: " + tb[-900:])
             write_startup_error(tb)
@@ -742,8 +859,11 @@ class OCRScannerApp(App):
             raise RuntimeError("No camera app on this device - use Upload Image")
         android_activity().startActivityForResult(intent, CAMERA_REQUEST)
     def _start_desktop_capture(self):
-        if cv2 is None:
-            raise RuntimeError("OpenCV (cv2) is not installed, so the desktop camera cannot run")
+        try:
+            import cv2
+        except Exception as exc:  # noqa: BLE001 - desktop only, and only now
+            raise RuntimeError("OpenCV (cv2) is not installed, so the desktop camera "
+                               "cannot run: {}".format(exc))
 
         def worker():
             cap = cv2.VideoCapture(0)
@@ -832,9 +952,9 @@ class OCRScannerApp(App):
         if not screen.current_image_path:
             self._flash("Choose an image first")
             return
-        if ocr_engine is None:
-            raise RuntimeError("ocr_engine could not be imported: " +
-                               "; ".join(name for name, _ in PROBLEMS))
+        # No check for the engine here on purpose: `ocr_engine_module()` is called on
+        # the worker thread below, so a device whose numpy/OpenCV libraries fail to
+        # load reports it in the result panel instead of dying during startup.
 
         screen.ids.scan_btn.text = "Scanning..."
         screen.ids.scan_btn.disabled = True
@@ -853,7 +973,7 @@ class OCRScannerApp(App):
                 except Exception as exc:  # noqa: BLE001 - only disables ML Kit
                     Logger.error("OCRScanner: no activity for OCR: {}".format(exc))
                     ocr_context = None
-                result = ocr_engine.extract_numbers(image_path, context=ocr_context)
+                result = ocr_engine_module().extract_numbers(image_path, context=ocr_context)
                 # Readable in logcat and in `adb logcat | grep OCRDIAG`, so "which
                 # engine answered on this phone" is answerable without a rebuild.
                 log_diag("engine", "method={} alts={}".format(

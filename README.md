@@ -176,7 +176,26 @@ optional, and they are the reason the last crash-on-open was so expensive to cha
 * **no `import kivy.core.window` anywhere.** That import is what *selects* a window provider,
   and when none works Kivy calls `sys.exit(1)` - which no `try/except` can catch. `Window` is
   read from `sys.modules` instead, so the app can only ever see a window Kivy already made.
-  Error dialogs use a `Label` in a `ScrollView` (with a Copy button), never a `TextInput`.
+  Error dialogs use a `Label` in a `ScrollView` (with a Copy button), never a `TextInput`,
+  and `main.py` does not import `kivy.uix.textinput` at module scope either - that module
+  starts with `from kivy.core.window import Window`, so importing it would pick the provider
+  in the middle of `main.py` instead of inside `App.run()`, where Kivy expects it.
+* **no heavy native module at startup.** `import cv2` and `import numpy` (via `ocr_engine`)
+  used to run while `main.py` was being imported, and a native library that fails to load -
+  a mismatched `.so`, a rejected `dlopen`, a crashing static initialiser - does not raise
+  `ImportError`: the process just ends, with no traceback, on the ABI the CI emulator is not
+  running (CI boots x86_64, a phone installs arm64). `cv2` is now imported by the one
+  function that needs it (desktop webcam) and the OCR pipeline by `ocr_engine_module()` on
+  the **scan worker thread**, so a phone that cannot load them still opens, still shows its
+  screen, and reports the missing engine as text. `sqlite3` stays at module scope: it is a
+  python-for-android core recipe, not a ported wheel.
+* **every startup step is on the record.** `stage()` appends a milestone
+  (`build-begin`, `kv-loaded`, `screens-built`, `startup-ok`, `ready`, or
+  `ocr-import-begin`/`ocr-import-failed`) to logcat **and** to
+  `startup_trace.txt` in the app's own directory, fsync'd. A native abort cannot skip the
+  file, so the next launch knows where the previous one stopped and prints
+  `Last run stopped at: <stage>` in the result panel - and the boot test fails a build whose
+  app never reached `ready`, rather than one that merely drew a frame.
 
 ## Guards that run before the (30-minute) build
 
@@ -210,6 +229,12 @@ stays whole, the first becomes `U6234`.
   the App's clipboard.
 * If a button ever shows the red dialog, tap **Copy** and paste it into an issue - that text
   is the actual cause, which a crash on the phone never shows you.
+* **If the app closes when you open it, no cable is needed.** Open it again. If the small line
+  under the engine label says `Last run stopped at: X`, that `X` is where the previous launch
+  died, and it is the whole diagnosis: `ocr-import-begin` means a native library for this
+  phone's architecture failed to load, `build-begin`/`kv-loaded` means the UI itself could not
+  be built, and nothing at all means the process died before Kivy started. With a cable it is
+  one line: `adb logcat -d -s python:V | grep OCRDIAG`.
 
 ## OCR engine on Android
 

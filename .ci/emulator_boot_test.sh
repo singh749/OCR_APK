@@ -264,6 +264,17 @@ if [ "${OCR_PROBE:-0}" = "1" ]; then
   esac
 fi
 
+# The layout record proves the UI was measured; `stage ready` proves the app got
+# as far as its own main loop (main.py emits it from on_start). A build that draws a
+# frame and then dies in the first timer would otherwise pass every check above, and
+# "it opens then closes" is the original complaint this job exists to catch. If it is
+# missing, the last `OCRDIAG stage` line is the answer to "where did it stop?" - which
+# is also the question to ask of a phone nobody here can reach.
+if ! grep -a -q "OCRDIAG stage ready" "$DIAG"; then
+  last_stage="$(grep -a 'OCRDIAG stage' "$DIAG" | tail -1 | sed -E 's/^.*(OCRDIAG stage .*)$/\1/')"
+  fail "startup never reached the main loop - last milestone: ${last_stage:-none}"
+fi
+
 echo "=== device log records"
 while IFS= read -r line; do
   echo "  $line"
