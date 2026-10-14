@@ -132,8 +132,8 @@ launches it and asserts on logcat (`.ci/emulator_boot_test.sh`):
 
 | Check | What it catches |
 | --- | --- |
-| a process for `org.metalocr.ocrscanner` exists within 80 s | **"it closes as soon as I open it"** |
-| the same pid is still alive 12 s later | a crash after the first frame (a broken timer, a bad popup) |
+| `OCRDIAG startup` appears in logcat, polled until it does | **"it closes as soon as I open it"** — and it is polled, not slept on, because a *first* launch unpacks the Python bundle and a fixed timeout blamed the app for it |
+| the pid is still there when the layout record lands | a crash after the first frame (a broken timer, a bad popup) |
 | `FATAL EXCEPTION` / `Fatal signal` / `ANR in` absent in logcat | Java- and native-level deaths |
 | no `E python : Traceback` in logcat | a Python exception during import or `build()` |
 | `OCRDIAG layout window=<W>x<H>` with W >= 720 | the **"interface renders tiny"** bug, measured instead of eyeballed |

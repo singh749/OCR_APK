@@ -2,13 +2,17 @@
 # Boot the freshly built APK on an emulator and prove the app really starts.
 #
 # Everything else in this pipeline can only say "an APK was produced". A Python
-# AttributeError in a Kivy callback, a .kv file that references a handler that
-# does not exist, or a layout that renders into a 400x750 box all build
-# perfectly and fail on the phone. This step is the phone.
+# exception during import, a .kv file that calls a handler that does not exist, a
+# Java bridge that fails on the device, or a UI laid out into a 400x750 box all
+# build perfectly and fail on the phone. This step is the phone.
 #
-# main.py writes greppable one-line records to logcat under the tag `python`
-# (`OCRDIAG startup ...`, `OCRDIAG layout window=1080x2400 ...`), which is what
-# makes both of those failure modes measurable here instead of eyeballed.
+# main.py writes greppable one-line records to logcat under the `python` tag
+# (`OCRDIAG startup`, `OCRDIAG layout window=1080x2400 ...`, `OCRDIAG fatal ...`),
+# which is what makes those failure modes assertable instead of eyeballed.
+#
+# Evidence rule: an artifact cannot be read from outside the runner, but a job
+# annotation can (`/check-runs/<job id>/annotations`), so every verdict prints the
+# log lines that justify it into the `::error::`/`::notice::` message itself.
 #
 # Usage: emulator_boot_test.sh <apk-path> [package-name]
 set -uo pipefail
@@ -17,27 +21,35 @@ APK="${1:?usage: emulator_boot_test.sh <apk> [package]}"
 PKG="${2:-org.metalocr.ocrscanner}"
 LOGCAT=emulator-logcat.txt
 DIAG=ui-report.txt
-PROBLEMS=boot-problems.txt
 : > "$LOGCAT"
 : > "$DIAG"
-: > "$PROBLEMS"
+: > boot-problems.txt
 
-note() { echo "::notice::$*"; }
-say() { echo "$*"; echo "* $*" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true; }
+say() { echo "$*"; echo "* $*" >> "${GITHUB_STEP_SUMMARY:-/dev/null}" 2>/dev/null || true; }
+
+# The excerpt of device log that explains the verdict, capped so the annotation is
+# not truncated by GitHub's size limit.
+log_tail() {
+  {
+    echo "--- python-tagged lines: $(grep -a -c "python  *:" "$LOGCAT" 2>/dev/null || echo 0)"
+    grep -a -E "OCRDIAG|FATAL EXCEPTION|Fatal signal|ANR in |Force finishing|Traceback|E python|ImportError|ModuleNotFoundError|OSError|dlopen|has died|Unable to start activity|SecurityException" \
+      "$LOGCAT" 2>/dev/null | tail -40
+    echo "--- last 15 lines of logcat"
+    tail -15 "$LOGCAT" 2>/dev/null
+  } | cut -c1-300
+}
 
 fail() {
-  echo "::error::$1"
-  say "**FAIL:** $1"
-  # The workflow publishes this file as a check run, which is the only way the
-  # device-side error survives outside the runner.
-  {
-    echo "### $1"
-    echo
-    echo '```'
-    grep -a -E "OCRDIAG|FATAL EXCEPTION|Traceback|E python|libc *: *Fatal|ANR in|Force finishing|has died|Unable to start activity|SecurityException|android.os.*Exception|ImportError|ModuleNotFoundError" \
-      "$LOGCAT" | tail -60
-    echo '```'
-  } > logcat-excerpt.txt
+  local reason="$1"
+  # The picture the user would have seen, even (especially) when it is wrong:
+  # a blank or half-drawn frame is the evidence for a layout complaint.
+  adb exec-out screencap -p > emulator-screenshot.png 2>/dev/null || true
+  echo "::error::BOOT TEST FAILED: $reason"
+  echo "::error::$(log_tail | tr '\n' '|' | tr -d '\r' | cut -c1-16000)"
+  say "**FAIL:** $reason"
+  # Written next to the log so it survives in the logcat file for the reporter
+  # step, which publishes it as the "Emulator boot log" check run.
+  { echo "BOOT TEST FAILED: $reason"; log_tail; } >> "$LOGCAT"
   exit 1
 }
 
@@ -47,75 +59,101 @@ if [ ! -f "$APK" ]; then
 fi
 
 adb wait-for-device
-say "device: $(adb shell getprop ro.build.version.release 2>/dev/null) (API $(adb shell getprop ro.build.version.sdk 2>/dev/null)), sdk=$(adb shell getprop ro.product.cpu.abi 2>/dev/null)"
+say "device: android $(adb shell getprop ro.build.version.release 2>/dev/null | tr -d '\r') / api $(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r') / abi $(adb shell getprop ro.product.cpu.abi 2>/dev/null | tr -d '\r')"
 
 adb install -r -g "$APK" >install.log 2>&1 || fail "adb install failed: $(tail -3 install.log | tr '\n' ' ')"
-say "installed $(du -h "$APK" | cut -f1) APK"
+say "installed $(du -h "$APK" | cut -f1) $(basename "$APK")"
 
 adb logcat -c
 adb shell am force-stop "$PKG"
-
 # `monkey ... LAUNCHER` starts the app the way the home-screen icon does, without
-# hard-coding the activity class name (which differs per bootstrap).
+# hard-coding the activity class (which differs per bootstrap).
 adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >launch.log 2>&1 \
-  || fail "could not launch $PKG (is the launcher activity declared?)"
+  || fail "could not launch $PKG: $(tail -3 launch.log | tr '\n' ' ')"
 
-# 40 x 2s: the first launch of a Kivy app has to unpack the Python bundle, so
-# "not up after 80 seconds" really is broken. Overridable so the check can be run
-# against a fake adb in seconds instead of minutes.
-pid=""
-for _i in $(seq 1 "${BOOT_WAIT_TRIES:-40}"); do
-  sleep "${BOOT_WAIT_STEP:-2}" 
-  pid="$(adb shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
-  [ -n "$pid" ] && break
-done
-if [ -z "$pid" ]; then
+# --- wait for the app to report itself --------------------------------------
+# A *first* launch of a debug APK has to unpack the Python bundle before any
+# Python runs, which on a cold emulator image can take a couple of minutes. A
+# fixed sleep was what made this step fail on a perfectly good build, so the
+# loop waits for evidence of life (or of death) instead of for a wall clock.
+tries="${BOOT_WAIT_TRIES:-60}"
+step="${BOOT_WAIT_STEP:-5}"
+seen_pid=""
+verdict=""
+for _i in $(seq 1 "$tries"); do
+  sleep "$step"
   adb logcat -d > "$LOGCAT" 2>&1
-  fail "app never stayed up: no process for $PKG after 80s (crash on open)"
-fi
+  if grep -a -q "OCRDIAG startup" "$LOGCAT"; then
+    verdict=started
+    break
+  fi
+  if grep -a -qE "FATAL EXCEPTION|Fatal signal|ANR in |Force finishing activity" "$LOGCAT"; then
+    verdict=fatal
+    break
+  fi
+  pid="$(adb shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+  [ -n "$pid" ] && seen_pid="$pid"
+done
 
-# Give Kivy time to draw a frame and to log the layout record, then confirm the
-# process is *still* there: a crash on the first tap-equivalent timer shows up here.
-sleep "${BOOT_SETTLE:-12}"
-after="$(adb shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
-adb logcat -d > "$LOGCAT" 2>&1
+case "$verdict" in
+  fatal)
+    fail "Android reported a fatal error during startup: $(grep -a -m1 -E 'FATAL EXCEPTION|Fatal signal|ANR in ' "$LOGCAT" | cut -c1-160)"
+    ;;
+  started)
+    ;;
+  *)
+    if [ -n "$seen_pid" ]; then
+      fail "app process existed (pid $seen_pid) but never logged OCRDIAG startup within ${tries} tries at ${step}s apart - Python did not reach build()"
+    fi
+    fail "no process for $PKG at all within ${tries} tries at ${step}s apart - the app never launched (crash on open)"
+    ;;
+esac
+
+# Now that Python is up: give Kivy a frame to draw (build() schedules the layout
+# record ~1s later) and confirm the process is still there - a death on the first
+# timer or the first draw shows up here.
+for _i in $(seq 1 "${BOOT_SETTLE_TRIES:-12}"); do
+  sleep "${BOOT_WAIT_STEP:-5}"
+  adb logcat -d > "$LOGCAT" 2>&1
+  if grep -a -qE "OCRDIAG (layout|fatal)" "$LOGCAT" && [ -z "$(adb shell pidof "$PKG" 2>/dev/null | tr -d '\r')" ]; then
+    fail "app logged a fatal record and then disappeared"
+  fi
+  if grep -a -q "OCRDIAG layout" "$LOGCAT"; then break; fi
+done
+
 adb exec-out screencap -p > emulator-screenshot.png 2>/dev/null || true
 
-if [ -z "$after" ]; then
-  fail "app started (pid $pid) then died within 12s - crash after startup"
-fi
-say "app alive: pid $pid -> $after"
+grep -a "OCRDIAG" "$LOGCAT" | sed -E 's/^.*(OCRDIAG)/\1/' > "$DIAG" 2>/dev/null || true
+[ -s "$DIAG" ] || fail "OCRDIAG startup was seen but no records could be extracted (log format changed?)"
 
-grep -a "OCRDIAG" "$LOGCAT" | sed -E 's/^[0-9-]+ [0-9:.]+ +[0-9]+ +[0-9]+ +[A-Z] +//' > "$DIAG" 2>/dev/null || true
-if [ ! -s "$DIAG" ]; then
-  fail "no OCRDIAG records in logcat: main.py never finished build(), so Python died during import or build"
-fi
-
-# Unambiguous death / exception markers, whatever the app managed to log.
-if grep -q -a -E "FATAL EXCEPTION|Fatal signal|ANR in |Force finishing activity" "$LOGCAT"; then
-  grep -a -E "FATAL EXCEPTION|Fatal signal|ANR in |Force finishing activity" "$LOGCAT" | head -5 > boot-problems.txt
-  fail "Android reported a fatal error: $(head -1 boot-problems.txt | cut -c1-160)"
-fi
-if grep -q -a -E "E python  *: *Traceback" "$LOGCAT"; then
-  fail "Python logged a traceback during startup (see the emulator boot log check run)"
+# A Python traceback after startup means something in the app raised, even if
+# Android itself never reported a fatal error.
+if grep -a -qE "E python *: *Traceback|OCRDIAG fatal" "$LOGCAT"; then
+  fail "Python raised during startup: $(grep -a -m1 -E 'E python *:.*/' "$LOGCAT" | cut -c1-160)"
 fi
 
-# The "interface looks tiny" bug: Kivy laid everything out inside the size that
-# Window.size forced, so the recorded window is far smaller than the screen.
+# `adb shell pidof` exit status is not trustworthy across adb versions, so the
+# output is what decides.
+final_pid="$(adb shell pidof "$PKG" 2>/dev/null | tr -d '\r')"
+[ -n "$final_pid" ] || fail "app died after logging startup: no pid at the end of the test"
+
+# "The interface looks tiny", measured: Kivy was given the whole surface, not a
+# forced 400x750 box.
 win="$(grep -a -o -E "OCRDIAG layout window=[0-9]+x[0-9]+" "$DIAG" | head -1 | grep -o -E "[0-9]+x[0-9]+")"
-if [ -z "$win" ]; then
-  fail "no 'OCRDIAG layout window=' record: build() reported no layout, layout check skipped"
-fi
-w="${win%x*}"; h="${win#*x}"
+[ -n "$win" ] || fail "no 'OCRDIAG layout window=' record: build() never reported its layout"
+w="${win%x*}"
+h="${win#*x}"
 if [ "$w" -lt 720 ] || [ "$h" -lt 1000 ]; then
   fail "UI rendered into ${win}px instead of filling the screen (Window.size forced on Android?)"
 fi
-note "window ${win}px, app alive, no fatal markers"
-say "layout window=${win} $(grep -a -o -E 'dpi=[0-9.]+ density=[0-9.]+' "$DIAG" | head -1)"
-say "records:"
+
+echo "=== device log records"
+while IFS= read -r line; do
+  echo "  $line"
+  echo "::notice::$line"
+done < "$DIAG"
+say "app started, window is ${win}px, no fatal markers"
 say '```'
-while IFS= read -r line; do note "$line"; say "$line"; done < "$DIAG"
+say "$(tr '\n' '|' < "$DIAG" | cut -c1-1500)"
 say '```'
-echo "=== log:"
-cat "$DIAG"
 echo "=== boot test passed"

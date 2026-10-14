@@ -92,7 +92,15 @@ def log_candidates():
     # FAILURE_LOG to its logcat so the same check-run/annotation machinery carries
     # the *device* error out of CI (that is the only output of a phone run that is
     # readable from outside the runner).
-    add(os.environ.get("FAILURE_LOG", ""))
+    # An explicitly requested log wins outright, and is not re-sorted by size
+    # below: the emulator job asks for its logcat, which is *smaller* than the
+    # 10 MB build log - sorting by size made the build log win and the device
+    # error never reached the report.
+    preferred = os.environ.get("FAILURE_LOG", "").strip()
+    if preferred:
+        add(preferred)
+        if found:
+            return found
     add("build.log")  # what the `| tee build.log` in the build step captured
     add("buildozer.log")
     add(os.path.expanduser("~/.buildozer/log/buildozer.log"))
