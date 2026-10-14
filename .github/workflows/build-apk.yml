@@ -78,6 +78,15 @@ jobs:
       - name: Show effective buildozer.spec
         run: grep -vE '^[[:space:]]*(#|$)' buildozer.spec
 
+      # Buildozer clones python-for-android into ~/.buildozer and then *keeps*
+      # whatever clone it finds (it only re-pulls on `buildozer android update`),
+      # so a stale checkout silently overrides `p4a.branch`. On CI that means a
+      # pre-seeded or previously cached tree can build with a completely
+      # different p4a than requested -- which is exactly the kind of
+      # "recipe installs fine for them, fails for me" bug. Start clean.
+      - name: Force a fresh python-for-android checkout
+        run: rm -rf "$HOME/.buildozer/android/platform/python-for-android"
+
       - name: Build debug APK with Buildozer
         # First run downloads the Android SDK + NDK and cross-compiles
         # CPython, Kivy, numpy, Pillow and OpenCV: expect roughly 30-45 min.
@@ -92,6 +101,20 @@ jobs:
           buildozer --verbose android debug 2>&1 \
             | tee build.log \
             | sed -E '/warning:|[[:space:]]note:|to allow an error code/d'
+
+      # Which python-for-android revision actually produced this build? With the
+      # forced fresh checkout above this is the branch/HEAD from `p4a.branch`,
+      # and quoting it makes "works for me / fails in CI" reports debuggable.
+      - name: Record the python-for-android revision
+        if: always()
+        run: |
+          p4a="$HOME/.buildozer/android/platform/python-for-android"
+          if [ -d "$p4a/.git" ]; then
+            git -C "$p4a" log -1 --format='python-for-android %h (%cd) %s' --date=short
+            echo "branch: $(git -C "$p4a" rev-parse --abbrev-ref HEAD)"
+          else
+            echo "python-for-android was never cloned (build died before that step)"
+          fi
 
       - name: Report the failure (check run + annotations + PR comment)
         # Without this a red "X" tells you nothing. The script finds the log

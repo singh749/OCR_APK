@@ -34,6 +34,17 @@ source.exclude_patterns = license,authors.*
 # ---------------------------------------------------------------------------
 requirements = python3==3.13.16,hostpython3==3.13.16,kivy,android,pyjnius,sqlite3,numpy,pillow,opencv
 
+# Which python-for-android branch to build with. `develop` is what buildozer's
+# own CI and install docs use, and it is required here: the master snapshot
+# still dies while installing Kivy's `requests` dependency chain with
+#   ERROR: charset_normalizer-3.5.x-cp313-...-android_24_arm64_v8a.whl
+#   is not a supported wheel on this platform
+# (kivy/buildozer#2051), fixed by kivy/python-for-android#3366, which teaches
+# p4a to take the prebuilt Android wheels from PyPI instead of pip-installing
+# its own cross-compiled wheel with a host interpreter that rejects the tag.
+# Buildozer keeps an existing clone, so bump this with `buildozer android update`.
+p4a.branch = develop
+
 # One ABI only: each extra ABI doubles the compile time of numpy/OpenCV.
 # Add armeabi-v7a (or x86_64 for emulators) once the build is green.
 android.archs = arm64-v8a
