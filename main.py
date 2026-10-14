@@ -149,21 +149,28 @@ def media_store_uri_for_new_photo(filename):
     """A content:// URI the camera app may write a new JPEG into.
 
     A plain file:// path cannot be handed to another app any more (Android 7+
-    throws FileUriExposedException), so the photo is created through MediaStore.
+    throws FileUriExposedException), and buildozer cannot inject the
+    FileProvider that would be the alternative, so the photo is created through
+    MediaStore and its Uri is shared with a write grant.
+
+    Nested classes are spelled with '$' (android.provider.MediaStore$Images$Media)
+    because that is what pyjnius resolves - the same form python-for-android's own
+    `android` helpers use, e.g. autoclass("android.os.Build$VERSION").
     """
     from jnius import autoclass
-    Build = autoclass("android.os.Build")
+    Build_VERSION = autoclass("android.os.Build$VERSION")
     ContentValues = autoclass("android.content.ContentValues")
     MediaStore = autoclass("android.provider.MediaStore")
+    Images = autoclass("android.provider.MediaStore$Images$Media")
 
     values = ContentValues()
-    values.put(MediaStore.Images.Media.DISPLAY_NAME, filename)
-    values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-    if int(Build.VERSION.SDK_INT) >= 29:
-        values.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/OCRScanner")
+    values.put(Images.DISPLAY_NAME, filename)
+    values.put(Images.MIME_TYPE, "image/jpeg")
+    if int(Build_VERSION.SDK_INT) >= 29:
+        values.put(Images.RELATIVE_PATH, "Pictures/OCRScanner")
 
     uri = android_activity().getContentResolver().insert(
-        MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        Images.EXTERNAL_CONTENT_URI, values)
     if uri is None:
         raise RuntimeError("Android refused to create a photo entry in the gallery")
     return uri
@@ -409,9 +416,9 @@ class OCRScannerApp(App):
         self._open_desktop_chooser()
 
     def _start_android_pick(self):
+        # ACTION_GET_CONTENT needs no permission at all, unlike any gallery query.
         from jnius import autoclass
         Intent = autoclass("android.content.Intent")
-        MediaStore = autoclass("android.provider.MediaStore")
         intent = Intent(Intent.ACTION_GET_CONTENT)
         intent.setType("image/*")
         intent.addCategory(Intent.CATEGORY_OPENABLE)
@@ -453,6 +460,8 @@ class OCRScannerApp(App):
         MediaStore = autoclass("android.provider.MediaStore")
 
         filename = "scan_{}.jpg".format(datetime.now().strftime("%Y%m%d_%H%M%S"))
+        # FLAG_GRANT_* (below) is what lets the camera app write into an entry
+        # this app owns; without it the intent is refused on every modern release.
         self._pending_uri = media_store_uri_for_new_photo(filename)
 
         intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
