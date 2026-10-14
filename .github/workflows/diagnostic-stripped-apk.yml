@@ -7,8 +7,15 @@ name: Diagnostic - stripped APK to locate a device-only crash
 # library*, and the way to answer it without a cable, a root, or a logcat is to
 # ship the same app with pieces removed and see what still opens.
 #
-# It is manual-only on purpose. The real pipeline is build-apk.yml; nothing here
-# replaces it, uploads a product artifact, or runs the emulator test.
+# It is manual-only on purpose: the dispatch button (which GitHub only registers
+# from the default branch) or a tag push, which is how it runs from a feature branch.
+# The real pipeline is build-apk.yml; nothing here replaces it, uploads a product
+# artifact, or runs the emulator test.
+#
+# The input is named `strip_mode`, not `strip`: in bash, `strip` is a reserved
+# variable name, and assigning to it can leave a later command in the same step
+# unrunnable ("strip: command not found"). Any input name that collides with a
+# command is unsafe to use as a shell variable, so the shell variable here is `mode`.
 #
 # What each mode does to buildozer.spec:
 #
@@ -30,7 +37,7 @@ name: Diagnostic - stripped APK to locate a device-only crash
 on:
   workflow_dispatch:
     inputs:
-      strip:
+      strip_mode:
         description: 'What to remove from buildozer.spec for this diagnostic build'
         required: true
         default: no-ocr-libs
@@ -38,6 +45,15 @@ on:
         options:
           - no-ocr-libs
           - kivy-only
+  # A tag push works from any branch, which matters because GitHub registers
+  # `workflow_dispatch` only from the default branch: while this file lives on a
+  # feature branch the button does not exist, and the tag is the only way to run it.
+  # The tag name *is* the mode. `build-apk.yml` filters `on.push` to main/master, so
+  # a tag can never start a second 45-minute product build beside this one.
+  push:
+    tags:
+      - 'diagnostic-no-ocr-libs'
+      - 'diagnostic-kivy-only'
 
 permissions:
   contents: read
@@ -51,7 +67,9 @@ concurrency:
 
 jobs:
   build:
-    name: Build stripped debug APK (${{ github.event.inputs.strip }})
+    # Static: on a tag run there is no dispatch input to interpolate, and a job
+    # name that renders as an empty string is a bad trade for a little detail.
+    name: Build stripped debug APK (diagnostic)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
 
@@ -86,9 +104,27 @@ jobs:
           python -m pip install buildozer "cython<3.2" legacy-cgi virtualenv
           buildozer --version
 
+      - name: Decide what to strip
+        run: |
+          # The dispatch input when someone pressed the button; the tag name
+          # otherwise. Kept in the open rather than in a `${{ }}` ternary because
+          # the failure mode - a diagnostic that quietly built the full app - is
+          # worse than useless, so an unknown ref exits non-zero instead of
+          # defaulting.
+          mode="${{ github.event.inputs.strip_mode }}"
+          if [ -z "$mode" ]; then
+            case "$GITHUB_REF_NAME" in
+              diagnostic-kivy-only) mode="kivy-only" ;;
+              diagnostic-no-ocr-libs) mode="no-ocr-libs" ;;
+              *) echo "no mode for ref '$GITHUB_REF_NAME'" >&2; exit 1 ;;
+            esac
+          fi
+          echo "STRIP_MODE=$mode" >> "$GITHUB_ENV"
+          echo "diagnostic mode: $mode"
+
       - name: Strip the app
         run: |
-          mode="${{ github.event.inputs.strip }}"
+          mode="$STRIP_MODE"
           # `sed` and not a templated spec: this file must stay obviously derived
           # from the real buildozer.spec, so the only edit is the deletion of the
           # lines named above and the effective spec is printed for the log.
