@@ -88,6 +88,11 @@ def log_candidates():
         except OSError:
             pass
 
+    # Any log can be reported, not only Buildozer's: the emulator boot test sets
+    # FAILURE_LOG to its logcat so the same check-run/annotation machinery carries
+    # the *device* error out of CI (that is the only output of a phone run that is
+    # readable from outside the runner).
+    add(os.environ.get("FAILURE_LOG", ""))
     add("build.log")  # what the `| tee build.log` in the build step captured
     add("buildozer.log")
     add(os.path.expanduser("~/.buildozer/log/buildozer.log"))
@@ -227,7 +232,7 @@ def publish_check_run(title, summary):
     return api(
         f"/repos/{repo}/check-runs",
         {
-            "name": "Build log excerpt",
+            "name": os.environ.get("CHECK_NAME", "Build log excerpt"),
             "head_sha": sha,
             "status": "completed",
             "conclusion": "failure",
@@ -249,7 +254,8 @@ def publish_pr_comment(summary):
         return "skipped (not a pull_request event, or no token)"
     return api(
         f"/repos/{repo}/issues/{pr}/comments",
-        {"body": f"### Build Android APK failed\n\n{summary[:MAX_SUMMARY_CHARS]}"},
+        {"body": f"### {os.environ.get('FAILURE_LABEL', 'Build Android APK failed')}"
+                 f"\n\n{summary[:MAX_SUMMARY_CHARS]}"},
         token,
     )
 
@@ -281,7 +287,8 @@ def main():
         block = [f"(no readable content in {chosen})"]
 
     where = f" while building recipe `{recipe}`" if recipe else ""
-    title = f"Buildozer failed{where} - excerpt from {chosen} ({os.path.getsize(chosen)} bytes)"
+    label = os.environ.get("FAILURE_LABEL", "Buildozer failed")
+    title = f"{label}{where} - excerpt from {chosen} ({os.path.getsize(chosen)} bytes)"
     fenced = "```\n" + "\n".join(block) + "\n```"
     summary = (
         f"## {title}\n\n{fenced}\n\n"

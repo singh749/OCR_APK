@@ -67,7 +67,15 @@ android.accept_sdk_license = True
 # One line on purpose: buildozer splits this list on commas itself and has
 # no line-continuation syntax, so a backslash would end up inside a permission
 # name and quietly produce a broken <uses-permission> entry.
-android.permissions = CAMERA, INTERNET, (name=android.permission.READ_EXTERNAL_STORAGE;maxSdkVersion=32), (name=android.permission.WRITE_EXTERNAL_STORAGE;maxSdkVersion=28)
+# Only INTERNET, and only normal (never runtime) permissions: the Camera button
+# hands the job to the system camera app through an intent and the photo goes to
+# MediaStore, so nothing here needs a dangerous permission on Android 10+ (a
+# file:// path would be rejected outright, which is why MediaStore is used). A
+# shorter list is one less thing for the manifest and the startup surface.
+# The advanced "(name=...;maxSdkVersion=32)" syntax is supported by p4a, but it
+# rewrites the generated manifest - exactly what must not move while phone
+# reports are being chased.
+android.permissions = INTERNET
 
 orientation = portrait
 fullscreen = 0

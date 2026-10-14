@@ -24,6 +24,14 @@ permissions:
   issues: write
   pull-requests: write
 
+# Two pushes in a row used to cancel each other's *finished-so-far* work: GitHub's
+# duplicate-run handling kills the older in-progress run, and the run that builds the
+# APK takes 25-45 minutes, so the cancellation is what left a branch whose newest
+# commit had no APK at all. Queue instead of cancelling: both builds complete.
+concurrency:
+  group: ocr-apk-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-android:
     name: Build debug APK (Buildozer)
@@ -159,3 +167,110 @@ jobs:
           name: OCR-Scanner-APK
           path: bin/*.apk
           if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # Boot the app on a real Android instead of trusting that "an APK exists".
+  #
+  # The arm64 job above can only prove the *build* works. Every failure that has
+  # actually been reported from a phone - a .kv file calling a method that does not
+  # exist, an interface laid out into a 400x750 box, an exception thrown while the
+  # first frame is being built - is invisible to it, because Kivy resolves the UI at
+  # runtime. Running the app is the only way to see those, so this job does exactly
+  # that: build the same code for the emulator's architecture, install it, launch it
+  # and assert on what logcat says (see .ci/emulator_boot_test.sh).
+  #
+  # It duplicates the setup steps instead of sharing them: the arm64 job is the one
+  # that produces the APK people install, and it should keep working even while this
+  # job's plumbing changes.
+  # --------------------------------------------------------------------------
+  boot-test:
+    name: Boot the APK on an emulator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake autopoint gettext \
+            ccache cmake git lbzip2 make patch \
+            libffi-dev libltdl-dev libncurses-dev libssl-dev libtinfo6 libtool \
+            pkg-config python3 python3-dev python3-pip python3-venv \
+            unzip wget zip zlib1g-dev
+
+      - name: Install Python build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install buildozer "cython<3.2" legacy-cgi virtualenv
+
+      # x86_64 only, and only for this job: an arm64 APK cannot be installed on an
+      # x86_64 emulator at all (there is no translation layer for it), so testing a
+      # device run means producing a second APK. The phone keeps getting the arm64
+      # one from the job above.
+      - name: Build for the emulator architecture
+        run: |
+          set -o pipefail
+          sed -i 's/^android\.archs = .*/android.archs = x86_64/' buildozer.spec
+          grep '^android.archs' buildozer.spec
+          rm -rf "$HOME/.buildozer/android/platform/python-for-android"
+          buildozer --verbose android debug 2>&1 \
+            | tee build.log \
+            | sed -E '/warning:|[[:space:]]note:|to allow an error code/d'
+
+      - name: Boot the APK and check it stayed up
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: bash .ci/emulator_boot_test.sh "$(ls bin/*.apk | head -1)"
+
+      # The same reporter the build job uses, pointed at the device log: logcat is
+      # the only output of a phone run that can be read from outside the runner, and
+      # this is what carries an OCRDIAG record or a Python traceback into a check run.
+      - name: Report a boot failure (check run + annotations)
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          FAILURE_LOG: emulator-logcat.txt
+          CHECK_NAME: Emulator boot log
+          FAILURE_LABEL: Emulator boot test failed
+        run: python .ci/ci_failure_report.py
+
+      - name: Upload the emulator evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: emulator-evidence
+          path: |
+            emulator-logcat.txt
+            emulator-screenshot.png
+            ui-report.txt
+            boot-problems.txt
+          if-no-files-found: ignore
+
+      - name: Upload the x86_64 APK (emulator testing only, do not install)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OCR-Scanner-APK-x86_64
+          path: bin/*.apk
+          if-no-files-found: ignore

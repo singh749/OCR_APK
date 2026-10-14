@@ -123,6 +123,54 @@ That is the form python-for-android's own helpers use (`android/storage.py`,
 are static (`MediaStore.ACTION_IMAGE_CAPTURE`, `Intent.FLAG_GRANT_WRITE_URI_PERMISSION`,
 `Activity.RESULT_OK`) may be read off the outer class.
 
+## The job that runs the app, not just builds it
+
+`build-android` can only say "an APK was produced". Every real complaint about this app has
+been about what happens *on the phone*, which no build step can see, so a second job
+(`boot-test`) builds the same code for `x86_64`, installs it on an Android 13 emulator,
+launches it and asserts on logcat (`.ci/emulator_boot_test.sh`):
+
+| Check | What it catches |
+| --- | --- |
+| a process for `org.metalocr.ocrscanner` exists within 80 s | **"it closes as soon as I open it"** |
+| the same pid is still alive 12 s later | a crash after the first frame (a broken timer, a bad popup) |
+| `FATAL EXCEPTION` / `Fatal signal` / `ANR in` absent in logcat | Java- and native-level deaths |
+| no `E python : Traceback` in logcat | a Python exception during import or `build()` |
+| `OCRDIAG layout window=<W>x<H>` with W >= 720 | the **"interface renders tiny"** bug, measured instead of eyeballed |
+| at least one `OCRDIAG` record at all | `build()` never finished, i.e. Python died very early |
+
+The records come from `main.py`'s `log_diag()`: `OCRDIAG startup ...`, `OCRDIAG problem ...`,
+`OCRDIAG layout window=... preview=...`, `OCRDIAG fatal ...`. On a real phone the same lines
+are the whole diagnosis:
+
+```
+adb logcat -d -s python:V | grep OCRDIAG
+```
+
+On failure the job publishes the logcat excerpt as an **"Emulator boot log"** check run (and
+a PR comment), and uploads `emulator-logcat.txt`, `ui-report.txt` and `emulator-screenshot.png`
+as the `emulator-evidence` artifact - the screenshot is the one thing a "the layout looks
+wrong" report cannot be argued with.
+
+Why the phone's APK is not tested here: an `arm64-v8a` APK cannot be installed on an `x86_64`
+emulator (there is no translation layer in that direction), so a device run needs a second
+architecture. Adding `x86_64` to `android.archs` in `buildozer.spec` would put both in one
+APK, at the cost of building every recipe twice.
+
+## Startup is deliberately boring
+
+Three rules in `main.py` exist only so that "the app opens" is never at the mercy of anything
+optional, and they are the reason the last crash-on-open was so expensive to chase:
+
+* **no pyjnius at startup.** `ensure_activity_listener()` registers the Android activity-result
+  callback the first time Camera or Upload is used, not in `build()`.
+* **no dialog at startup.** Missing modules are named in the result panel and in logcat; a
+  `Popup` created during `build()` is a crash surface of its own.
+* **no `import kivy.core.window` anywhere.** That import is what *selects* a window provider,
+  and when none works Kivy calls `sys.exit(1)` - which no `try/except` can catch. `Window` is
+  read from `sys.modules` instead, so the app can only ever see a window Kivy already made.
+  Error dialogs use a `Label` in a `ScrollView` (with a Copy button), never a `TextInput`.
+
 ## Guards that run before the (30-minute) build
 
 ```

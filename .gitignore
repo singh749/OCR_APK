@@ -25,3 +25,4 @@ buildozer.log
 
 # CI log capture (.github/workflows/build-apk.yml)
 build.log
+startup_error.txt

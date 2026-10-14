@@ -17,6 +17,7 @@ closes the app ("it crashes") with nothing to read:
 
 import os
 import shutil
+import sys
 import threading
 import traceback
 from datetime import datetime
@@ -41,6 +42,33 @@ IS_ANDROID = platform == "android"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 KV_PATH = os.path.join(APP_DIR, "main.kv")
 TEMP_DIR = os.path.join(APP_DIR, "temp_images")
+STARTUP_ERROR_PATH = os.path.join(APP_DIR, "startup_error.txt")
+
+
+def log_diag(kind, detail):
+    """Write a one-line record that a test - or a logcat dump - can grep for.
+
+    On a phone, "the app closes as soon as I open it" leaves nothing readable
+    behind: the process is gone before it can show anything. So every fact that
+    tells "started", "started with missing modules" and "died inside build()"
+    apart is also written to logcat under the `python` tag. The CI emulator job
+    (.ci/emulator_boot_test.sh) asserts on these lines, which turns a UI rendered
+    into the wrong box, or an exception during startup, into a failing build
+    instead of another round of phone reports.
+    """
+    line = "OCRDIAG {} {}".format(kind, str(detail).replace("\n", " | "))
+    Logger.info(line)
+    return line
+
+
+def write_startup_error(text):
+    """Last-resort breadcrumb, in the app's own files dir (readable via adb)."""
+    try:
+        with open(STARTUP_ERROR_PATH, "w", encoding="utf-8") as handle:
+            handle.write("OCRScanner startup failure {}\n\n{}".format(
+                datetime.now().isoformat(timespec="seconds"), text))
+    except Exception:  # pragma: no cover - best effort only
+        pass
 
 # --- optional native / heavy modules ---------------------------------------
 # A missing one must degrade to a message, never to a crash.
@@ -75,10 +103,16 @@ def apply_desktop_window_size():
     """
     if IS_ANDROID:
         return
+    window = getattr(sys.modules.get("kivy.core.window"), "Window", None)
+    if window is None:
+        # Deliberate: `import kivy.core.window` is what selects a window provider,
+        # and when none works Kivy calls sys.exit(1) rather than raising - which no
+        # try/except can catch. Kivy's own startup imports it, so on a machine that
+        # can show a window this is already set by the time build() runs.
+        Logger.debug("OCRScanner: no window module yet, leaving the size alone")
+        return
     try:
-        from kivy.core.window import Window
-        if Window is not None:
-            Window.size = (430, 840)
+        window.size = (430, 840)
     except Exception as exc:  # pragma: no cover - cosmetic only
         Logger.debug("OCRScanner: desktop window size skipped ({})".format(exc))
 
@@ -335,64 +369,148 @@ class OCRScannerApp(App):
     def build(self):
         self.title = "OCR Number Scanner"
         apply_desktop_window_size()
+        # Deliberately empty: the Java bridge (pyjnius autoclass, the activity
+        # result listener) is only touched by ensure_activity_listener(), the
+        # first time the camera or the gallery is actually used. Anything that can
+        # fail on a particular device must not stand between the app and its UI.
         self._activity_listener = None
         self._pending_uri = None
         self._flash_popup = None
+        self._error_popup = None
 
         try:
             Builder.load_file(KV_PATH)
             self.root = ScreenManager(transition=FadeTransition(duration=0.25))
             self.root.add_widget(MainScreen(name='main'))
             self.root.add_widget(HistoryScreen(name='history'))
-            if IS_ANDROID:
-                self._activity_listener = make_activity_result_listener(self._on_activity_result)
             if PROBLEMS:
-                Clock.schedule_once(self._show_startup_problems, 0.6)
+                # Not a dialog, on purpose: a Popup - and least of all a TextInput,
+                # which pulls in Android's soft-input machinery - created during
+                # build() is a startup risk of its own, and the first job of this
+                # app is to open. The missing modules are named in the result panel
+                # and in logcat instead.
+                for name, err in PROBLEMS:
+                    log_diag("problem", "{}: {}".format(name, err))
+                Clock.schedule_once(self._note_startup_problems, 0)
+            log_diag("startup", "platform={} kv=loaded screens=2 problems={}".format(
+                platform, len(PROBLEMS)))
+            Clock.schedule_once(self._report_layout, 1.0)
             return self.root
-        except Exception:
-            Logger.error("OCRScanner: startup failed\n" + traceback.format_exc())
-            return self._error_view(traceback.format_exc())
+        except Exception:  # noqa: BLE001 - startup must always produce a screen
+            tb = traceback.format_exc()
+            Logger.error("OCRScanner: startup failed\n" + tb)
+            log_diag("fatal", "build() raised: " + tb[-900:])
+            write_startup_error(tb)
+            return self._error_view(tb)
+
+    def _note_startup_problems(self, _dt):
+        """Name the optional parts that are missing, as text in the UI."""
+        try:
+            label = self.root.get_screen('main').ids.engine_label
+            label.text = "Not installed: {}".format(
+                ", ".join(name for name, _ in PROBLEMS))
+            label.color = (0.95, 0.7, 0.3, 1)
+        except Exception:  # noqa: BLE001 - cosmetic only
+            pass
+
+    def _report_layout(self, _dt):
+        """Record what the window and the main rows actually measure.
+
+        This is the automated answer to "the interface looks small": the numbers
+        below are the pixel size Kivy was given and the size each row ended up
+        with, so a layout that was squeezed into a fixed box fails CI instead of
+        being spotted by hand on a phone.
+        """
+        parts = []
+        try:
+            from kivy.metrics import Metrics
+            window = getattr(sys.modules.get("kivy.core.window"), "Window", None)
+            if window is not None:
+                parts.append("window={}x{}".format(int(window.width), int(window.height)))
+            parts.append("dpi={:.0f}".format(Metrics.dpi))
+            parts.append("density={:.2f}".format(Metrics.density or 0.0))
+            if self.root is not None:
+                parts.append("root={}x{}".format(int(self.root.width), int(self.root.height)))
+                screen = self.root.get_screen('main')
+                for key, name in (("preview_box", "preview"), ("scan_btn", "scanbtn"),
+                                  ("result_number", "result")):
+                    widget = screen.ids.get(key) if hasattr(screen.ids, "get") else None
+                    if widget is not None:
+                        parts.append("{}={}x{}".format(name, int(widget.width), int(widget.height)))
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not raise
+            parts.append("error={}: {}".format(type(exc).__name__, exc))
+        log_diag("layout", " ".join(parts))
 
     # -- messaging ----------------------------------------------------------
-    def _show_startup_problems(self, _dt):
-        lines = ["{}: {}".format(name, err) for name, err in PROBLEMS]
-        self.show_error("Missing modules", "\n".join(lines))
-
     def show_error(self, title, detail):
-        """Show a readable, copyable error instead of dying."""
+        """Show a readable, copyable error instead of dying.
+
+        A Label inside a ScrollView rather than a TextInput: the text only has to
+        be read and copied, so nothing here should involve the keyboard - and an
+        error dialog that itself raises is how "it closes on the first tap" gets
+        mistaken for something deeper. The popup is kept on the app so Python
+        cannot garbage-collect it while it is open.
+        """
         text = "{}\n\n{}".format(title, detail if isinstance(detail, str) else repr(detail))
         Logger.error("OCRScanner: " + text)
+        log_diag("error", text)
         try:
-            field = TextInput(text=text, readonly=True, multiline=True, size_hint=(1, 1),
-                              background_normal='', background_color=(0.1, 0.11, 0.16, 1),
-                              foreground_color=(0.95, 0.85, 0.7, 1), font_size=sp(13))
-            popup = self._error_popup = Popup(
-                title="Something went wrong", content=field, size_hint=(0.94, 0.7),
-                separator_color=(0.2, 0.85, 1, 1), background_color=(0.12, 0.13, 0.18, 1))
-            popup.open()
-        except Exception:
-            pass  # never let error reporting cause an error
+            content = BoxLayout(orientation='vertical', spacing=dp(8), padding=dp(10))
+            field = Label(text=text, size_hint=(1, None), halign='left', valign='top',
+                          font_size=sp(13), color=(0.95, 0.85, 0.7, 1),
+                          text_size=(dp(300), None))
+            field.bind(width=lambda i, v: setattr(i, 'text_size', (v, None)),
+                       texture_size=lambda i, v: setattr(i, 'height', v[1] + dp(6)))
+            scroll = ScrollView(size_hint_y=1)
+            scroll.add_widget(field)
 
+            row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+            close_btn = Button(text="Close", size_hint_x=None, width=dp(110),
+                               background_normal='', background_color=(0.3, 0.32, 0.42, 1),
+                               bold=True, font_size=sp(14))
+            copy_btn = Button(text="Copy", size_hint_x=None, width=dp(110),
+                              background_normal='', background_color=(0.2, 0.6, 1, 1),
+                              bold=True, font_size=sp(14))
+            popup = self._error_popup = Popup(
+                title="Something went wrong", content=content, size_hint=(0.94, 0.75),
+                separator_color=(0.2, 0.85, 1, 1), background_color=(0.12, 0.13, 0.18, 1))
+
+            def copy_and_close(_btn):
+                self.clipboard = text
+                popup.dismiss()
+                self._flash("Error text copied")
+
+            close_btn.bind(on_press=lambda _b: popup.dismiss())
+            copy_btn.bind(on_press=copy_and_close)
+            row.add_widget(close_btn)
+            row.add_widget(copy_btn)
+            content.add_widget(scroll)
+            content.add_widget(row)
+            popup.open()
+        except Exception:  # noqa: BLE001 - reporting must never cause a report
+            pass
     def _error_view(self, text):
-        """Last-resort screen, used when the UI itself could not be built."""
+        """Last-resort screen, used when the UI itself could not be built.
+
+        Only Labels: whatever is left when build() has failed has to be the
+        simplest possible thing, and no TextInput / keyboard involvement.
+        """
         root = BoxLayout(orientation='vertical', padding=dp(14), spacing=dp(10))
         root.add_widget(Label(text="App could not start", font_size=sp(22), bold=True,
                               color=(0.95, 0.4, 0.35, 1), size_hint_y=None, height=dp(48)))
         scroll = ScrollView(size_hint_y=1)
-        field = TextInput(text=text, readonly=True, multiline=True, size_hint_y=None,
-                          background_normal='', background_color=(0.1, 0.11, 0.16, 1),
-                          foreground_color=(0.95, 0.85, 0.7, 1), font_size=sp(12))
-        def _grow(inst, _val):
-            # documented TextInput-in-a-ScrollView sizing, with a guard so the
-            # binding can never feed itself back in a loop
-            target = max(dp(44), inst.minimum_height)
-            if inst.height != target:
-                inst.height = target
-        field.bind(minimum_height=_grow)
+        field = Label(text=text, size_hint=(1, None), halign='left', valign='top',
+                      font_size=sp(12), color=(0.95, 0.85, 0.7, 1),
+                      text_size=(dp(300), None))
+        field.bind(width=lambda i, v: setattr(i, 'text_size', (v, None)),
+                   texture_size=lambda i, v: setattr(i, 'height', v[1] + dp(6)))
         scroll.add_widget(field)
         root.add_widget(scroll)
+        root.add_widget(Label(
+            text="Also saved as startup_error.txt in the app's own files folder",
+            font_size=sp(11), color=(0.5, 0.55, 0.65, 1), size_hint_y=None, height=dp(32),
+            text_size=(dp(300), None), halign='left', valign='top'))
         return root
-
     def _flash(self, message):
         label = Label(text=message, font_size=sp(16), color=(1, 1, 1, 1),
                       halign='center', valign='middle', size_hint=(1, None), height=dp(60))
@@ -415,15 +533,27 @@ class OCRScannerApp(App):
             return
         self._open_desktop_chooser()
 
+    def ensure_activity_listener(self):
+        """Register for activity results the first time Android is asked for one.
+
+        Kept out of build() on purpose: the Java bridge is the most device- and
+        bootstrap-specific thing this app touches (pyjnius proxies, an interface on
+        PythonActivity), so if it were ever unavailable the interface still has to
+        open and say so instead of dying on the way in.
+        """
+        if self._activity_listener is None:
+            self._activity_listener = make_activity_result_listener(self._on_activity_result)
+        return self._activity_listener
+
     def _start_android_pick(self):
-        # ACTION_GET_CONTENT needs no permission at all, unlike any gallery query.
+        # ACTION_GET_CONTENT needs no permission at all, unlike a gallery query.
+        self.ensure_activity_listener()
         from jnius import autoclass
         Intent = autoclass("android.content.Intent")
         intent = Intent(Intent.ACTION_GET_CONTENT)
         intent.setType("image/*")
         intent.addCategory(Intent.CATEGORY_OPENABLE)
         android_activity().startActivityForResult(intent, PICK_REQUEST)
-
     def _open_desktop_chooser(self):
         from kivy.uix.filechooser import FileChooserListView
         content = BoxLayout(orientation='vertical', spacing=dp(10), padding=dp(10))
@@ -455,23 +585,25 @@ class OCRScannerApp(App):
             self._start_desktop_capture()
 
     def _start_android_capture(self):
+        # Lazy on purpose (see ensure_activity_listener): pyjnius is not touched
+        # until the user actually asks for the camera.
+        self.ensure_activity_listener()
         from jnius import autoclass
         Intent = autoclass("android.content.Intent")
         MediaStore = autoclass("android.provider.MediaStore")
 
         filename = "scan_{}.jpg".format(datetime.now().strftime("%Y%m%d_%H%M%S"))
-        # FLAG_GRANT_* (below) is what lets the camera app write into an entry
-        # this app owns; without it the intent is refused on every modern release.
         self._pending_uri = media_store_uri_for_new_photo(filename)
 
         intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+        # Without the two grant flags the camera app is not allowed to write into
+        # an entry this app owns, and the capture silently never lands.
         intent.putExtra(MediaStore.EXTRA_OUTPUT, self._pending_uri)
         intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
                         Intent.FLAG_GRANT_READ_URI_PERMISSION)
         if intent.resolveActivity(android_activity().getPackageManager()) is None:
             raise RuntimeError("No camera app on this device - use Upload Image")
         android_activity().startActivityForResult(intent, CAMERA_REQUEST)
-
     def _start_desktop_capture(self):
         if cv2 is None:
             raise RuntimeError("OpenCV (cv2) is not installed, so the desktop camera cannot run")
@@ -652,4 +784,14 @@ if __name__ == "__main__":
         print("Optional modules unavailable:")
         for name, error in PROBLEMS:
             print("  - {}: {}".format(name, error))
-    OCRScannerApp().run()
+    try:
+        OCRScannerApp().run()
+    except Exception:  # noqa: BLE001 - the process is ending either way
+        tb = traceback.format_exc()
+        Logger.error("OCRScanner: fatal\n" + tb)
+        # Kivy can fail before or after build() (no window provider, a broken GL
+        # context, an interrupted first frame). Without this the only trace of it
+        # is a phone report saying "it closes when I open it".
+        log_diag("fatal", "run() raised: " + tb[-900:])
+        write_startup_error(tb)
+        raise
