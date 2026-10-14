@@ -143,6 +143,7 @@ launches it and asserts on logcat (`.ci/emulator_boot_test.sh`):
   emulator draws a frame every ~45 s — so `main.py` calls `do_layout()` itself before measuring,
   and a stale 100x100 default can neither pass for a real size nor fail for a missing one |
 | at least one `OCRDIAG` record at all | `build()` never finished, i.e. Python died very early |
+| `OCRDIAG ciscan cleaned=<expected>` after a relaunch with `--es ocr_file` | **"it opens but does not read the number"** — CI pushes a rendered card into the app's own files dir, relaunches the activity with that path as an intent extra, and asserts on what the *packaged engine* recognised through `run_ocr()` |
 
 The records come from `main.py`'s `log_diag()`: `OCRDIAG startup ...`, `OCRDIAG problem ...`,
 `OCRDIAG layout window=... preview=... laid_out=yes`, `OCRDIAG fatal ...`, and
@@ -253,6 +254,31 @@ answered; **“No OCR engine on this device”** now means the import of
 `tests/test_ocr_pipeline.py` covers the Python side of all this with a stubbed
 `jnius` (`install_fake_jnius`), including the missing-bridge and
 Java-throws-on-the-device cases — the parts that used to be untestable.
+
+### Verifying a read on a device, without a phone
+
+`OCR_PROBE=1` (set in the workflow) makes the boot job go one step past "the app
+stayed open": it pushes `tests/fixtures/ci_probe_card.png` into
+`/storage/emulated/0/Android/data/<pkg>/files/` — the app's own external files dir,
+readable with no runtime permission, which is how the manifest can stay at
+`INTERNET` alone — force-stops the app, and relaunches it with
+`am start -n <pkg>/org.kivy.android.PythonActivity --es ocr_file <path>`. The
+force-stop is required because p4a's activity is `singleTask`: a running instance is
+not handed a new intent.
+
+`main.py`'s `_start_ci_ocr_probe()` reads that extra 2 s after startup, sets
+`current_image_path` and calls `run_ocr()`, so the fixture travels the same code path
+as a thumb over the button — camera permission, temp copy, engine, cleaning and all —
+and the CI verdict is the app's own `OCRDIAG ciscan cleaned=U6234 method=ML Kit`
+record rather than a screenshot somebody squints at.
+
+Two failure kinds are deliberately separated. No record at all, or
+`missing=` / `skipped=` / `error=`, means the *plumbing* is broken — this repo's bug,
+always red. A reading that is present but wrong is an engine-quality question, so
+`PROBE_STRICT=0` downgrades it to a warning with `emulator-screenshot-ocr.png` and
+the device log attached; the workflow starts loose for a new fixture and flips to
+strict (the script's default) as soon as one run has read the number. The 23 KB
+fixture lives in `tests/`, which `source.exclude_dirs` already keeps out of the APK.
 
 ## Notes on `requirements.txt`
 

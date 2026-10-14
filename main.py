@@ -395,6 +395,10 @@ class OCRScannerApp(App):
             log_diag("startup", "platform={} kv=loaded screens=2 problems={}".format(
                 platform, len(PROBLEMS)))
             Clock.schedule_once(self._report_layout, 1.0)
+            # Optional, CI-only: if the launch intent names an image, scan it once
+            # the UI exists. That is how "reads the number" gets verified on an
+            # emulated phone instead of being promised in a changelog.
+            Clock.schedule_once(self._start_ci_ocr_probe, 2.0)
             return self.root
         except Exception:  # noqa: BLE001 - startup must always produce a screen
             tb = traceback.format_exc()
@@ -503,6 +507,45 @@ class OCRScannerApp(App):
                 log_diag("layout", "waiting for the first layout pass")
             return
         log_diag("layout", " ".join(parts))
+
+    def _start_ci_ocr_probe(self, *_dt):
+        """Scan the image named by the launch intent, if CI passed one.
+
+        `am start -n <pkg>/org.kivy.android.PythonActivity --es ocr_file <path>` is
+        the only way a pipeline can drive this app past "it opened": the probe goes
+        through `run_ocr()`, i.e. the same path the SCAN button uses, with the same
+        engine, on the device. A normal launch has no such extra and nothing here
+        happens - and every Android call is inside a try, because a diagnostic that
+        can crash the app it is diagnosing is worse than no diagnostic.
+        """
+        if not IS_ANDROID:
+            return
+        try:
+            intent = android_activity().getIntent()
+            path = intent.getStringExtra("ocr_file") if intent is not None else None
+        except Exception as exc:  # noqa: BLE001 - the probe is optional by design
+            log_diag("ciscan", "skipped={}: {}".format(type(exc).__name__, exc))
+            return
+        if not path:
+            return                      # the ordinary case: a person opened the app
+        if not os.path.exists(path):
+            log_diag("ciscan", "missing={}".format(path))
+            return
+        try:
+            screen = self.root.get_screen('main')
+            screen.current_image_path = path
+            self._ci_probe_active = True
+            log_diag("ciscan", "scanning={}".format(os.path.basename(path)))
+            self.run_ocr()
+        except Exception as exc:  # noqa: BLE001
+            self._ci_probe_active = False
+            log_diag("ciscan", "error={}: {}".format(type(exc).__name__, exc))
+
+    def _ci_probe_result(self, kind, detail):
+        """Emit the probe's verdict, once, and only while a probe is in flight."""
+        if getattr(self, "_ci_probe_active", False):
+            self._ci_probe_active = False
+            log_diag("ciscan", "{} {}".format(kind, detail))
 
     # -- messaging ----------------------------------------------------------
     def show_error(self, title, detail):
@@ -798,6 +841,12 @@ class OCRScannerApp(App):
         screen.ids.scan_btn.disabled = False
         screen.show_ocr_result(result)
 
+        self._ci_probe_result("cleaned={}".format(result.get("cleaned", "")),
+                              "method={} conf={} alts={}".format(
+                                  result.get("method", ""),
+                                  result.get("confidence", 0),
+                                  len(result.get("alternatives") or [])))
+
         cleaned = result.get("cleaned", "")
         if cleaned and database is not None:
             try:
@@ -810,6 +859,7 @@ class OCRScannerApp(App):
                 Logger.error("OCRScanner: saving history failed: {}".format(exc))
 
     def _on_ocr_error(self, error):
+        self._ci_probe_result("error={}".format(str(error)[:180]), "scan=failed")
         screen = self.root.get_screen('main')
         screen.ids.scan_btn.text = "SCAN NUMBER"
         screen.ids.scan_btn.disabled = False

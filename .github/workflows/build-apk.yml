@@ -234,6 +234,22 @@ jobs:
 
       - name: Boot the APK and check it stayed up
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          # Drive the app past "it opened": after the layout verdict the script
+          # relaunches the activity with an image to read, so the engine packaged
+          # into this build is exercised on a device through run_ocr() - the same
+          # call the SCAN button makes - and CI asserts on what it recognised.
+          #
+          # PROBE_STRICT is 0 while the fixture is new: "the scan produced nothing"
+          # or "it read a different string" is then a warning with the screenshot and
+          # logcat attached, instead of a red build over an engine-quality question.
+          # Flip it to 1 (the script's default) as soon as one run has read the
+          # number - from then on the pipeline owns the whole claim, not just the
+          # claim that the app starts.
+          OCR_PROBE: 1
+          PROBE_IMAGE: tests/fixtures/ci_probe_card.png
+          PROBE_EXPECT: U6234
+          PROBE_STRICT: 0
         with:
           api-level: 33
           arch: x86_64

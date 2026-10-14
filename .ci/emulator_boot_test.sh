@@ -35,8 +35,8 @@ say() { echo "$*"; echo "* $*" >> "${GITHUB_STEP_SUMMARY:-/dev/null}" 2>/dev/nul
 fatal_marker() {
   local log="$1" pid="$2" out=""
   # logcat writes `ANR in <package>, PID: 1234`, so the package name has to be
-# followed by a comma or whitespace - matching only a space misses every ANR.
-out="$(grep -a -E "ANR in ${PKG}([[:space:]]|,|\$)" "$log" 2>/dev/null | head -1)"
+  # followed by a comma or whitespace - matching only a space misses every ANR.
+  out="$(grep -a -E "ANR in ${PKG}([[:space:]]|,|\$)" "$log" 2>/dev/null | head -1)"
   if [ -z "$out" ] && grep -a -q "FATAL EXCEPTION" "$log" 2>/dev/null \
      && grep -a -q "Process: ${PKG}" "$log" 2>/dev/null; then
     out="$(grep -a -A2 "FATAL EXCEPTION" "$log" | grep -a -E "Process:|Exception|Error" | head -2 | tr '\n' ' ')"
@@ -198,6 +198,71 @@ for pair in preview scanbtn result; do
     fail "row '${pair}' measured ${size}px on a laid-out screen - it is invisible on the phone: ${layout_line}"
   fi
 done
+
+# --- on-device OCR probe -----------------------------------------------------
+# "An APK that opens" is half the job; PROBE makes the app *read a known photo*
+# through run_ocr(), the same call the SCAN button makes, so the engine that was
+# packaged into the build is exercised on a device instead of assumed. Off unless
+# OCR_PROBE=1, because it costs a second cold start: p4a's activity is singleTask,
+# so a running instance is not handed a new intent and `am start` has to follow a
+# force-stop.
+if [ "${OCR_PROBE:-0}" = "1" ]; then
+  say "on-device OCR probe"
+  probe_image="${PROBE_IMAGE:-tests/fixtures/ci_probe_card.png}"
+  probe_expect="${PROBE_EXPECT:-U6234}"
+  probe_dir="/storage/emulated/0/Android/data/$PKG/files"
+  [ -f "$probe_image" ] || fail "OCR_PROBE=1 but $probe_image is missing from the checkout"
+  # The app's own external files dir: readable with no permission at all, which is
+  # the whole reason for using it instead of /sdcard/Download (READ_EXTERNAL_STORAGE
+  # is not in the manifest, by design - see buildozer.spec).
+  adb shell mkdir -p "$probe_dir" >/dev/null 2>&1 || true
+  adb push "$probe_image" "$probe_dir/probe_card.png" >/dev/null 2>&1 ||
+    fail "could not push the probe image to $probe_dir"
+  adb logcat -c >/dev/null 2>&1 || true
+  adb shell am force-stop "$PKG" >/dev/null 2>&1 || true
+  adb shell am start -n "$PKG/org.kivy.android.PythonActivity" \
+    --es ocr_file "$probe_dir/probe_card.png" >/dev/null 2>&1 ||
+    fail "am start with --es ocr_file failed (is org.kivy.android.PythonActivity still the launcher activity?)"
+  ciscan=""
+  for _i in $(seq 1 "${OCR_PROBE_TRIES:-60}"); do
+    sleep "${BOOT_WAIT_STEP:-5}"
+    adb logcat -d > emulator-logcat-probe.txt 2>&1 || true
+    cat emulator-logcat-probe.txt >> "$LOGCAT" 2>/dev/null || true
+    ciscan="$(grep -a 'OCRDIAG ciscan' emulator-logcat-probe.txt 2>/dev/null \
+      | grep -a -E 'cleaned=|error=|missing=|skipped=' | tail -1 \
+      | sed -E 's/^.*(OCRDIAG ciscan.*)$/\1/')"
+    [ -n "$ciscan" ] && break
+    if fatal="$(fatal_marker emulator-logcat-probe.txt "")"; then
+      fail "the app died during the OCR probe: $fatal"
+    fi
+  done
+  adb exec-out screencap -p > emulator-screenshot-ocr.png 2>/dev/null || true
+  [ -n "$ciscan" ] || fail "no 'OCRDIAG ciscan cleaned=' record after ${OCR_PROBE_TRIES:-60} polls - the probe never produced a result (device shot: emulator-screenshot-ocr.png)"
+  echo "=== on-device OCR: $ciscan"
+  case "$ciscan " in
+    *error=*|*missing=*|*skipped=*)
+      # The probe itself could not run: the intent was ignored, the file was not
+      # readable, or our own code raised around the engine. That is a bug in this
+      # repo, so PROBE_STRICT does not apply to it.
+      fail "the on-device OCR probe could not run: $ciscan"
+      ;;
+    *"cleaned=$probe_expect "*)
+      say "on-device OCR read **$probe_expect** from the fixture: \`$ciscan\`"
+      ;;
+    *)
+      # A reading that is present but wrong is an engine-quality question - lighting
+      # and preprocessing tune it - so PROBE_STRICT decides whether it blocks: start
+      # at 0 when a fixture is new, flip it to 1 (the default) as soon as one run has
+      # read the number, and never loosen it again without a reason in the message.
+      probe_msg="on-device OCR did not read $probe_expect from the fixture: $ciscan"
+      if [ "${PROBE_STRICT:-1}" = "1" ]; then
+        fail "$probe_msg"
+      fi
+      echo "::warning::$probe_msg"
+      say ":warning: $probe_msg"
+      ;;
+  esac
+fi
 
 echo "=== device log records"
 while IFS= read -r line; do
