@@ -44,8 +44,12 @@ class MainScreen(Screen):
         all_res = ocr_data.get("all_results", {})
         alts = ocr_data.get("alternatives", [])
 
-        self.ids.result_number.text = cleaned if cleaned else "No number detected"
-        self.ids.engine_label.text = f"{method} OCR" if method else "OCR"
+        if method == "unavailable":
+            self.ids.result_number.text = "No OCR engine on this device"
+            self.ids.engine_label.text = "OCR engine not installed"
+        else:
+            self.ids.result_number.text = cleaned if cleaned else "No number detected"
+            self.ids.engine_label.text = f"{method} OCR" if method else "OCR"
         self.ids.confidence_bar.value = min(conf, 100)
         self.ids.confidence_label.text = f"{conf:.1f}%"
 

@@ -123,7 +123,15 @@ def extract_numbers(image_path):
     elif HAS_TESSERACT:
         engine_name = "Tesseract"
     else:
-        print("[OCR] No OCR engine available!")
+        # No engine could be imported. This is the normal case inside the
+        # Android APK: python-for-android has no recipe for easyocr/torch or
+        # for the tesseract binary, so neither module can be packaged.
+        # See README.md ("OCR engine on Android") for the on-device options.
+        print(
+            "[OCR] No OCR engine available - install easyocr or pytesseract "
+            "for the desktop build; the Android APK needs an on-device engine."
+        )
+        result["method"] = "unavailable"
         return result
 
     all_candidates = []
