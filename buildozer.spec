@@ -1,68 +1,37 @@
-# buildozer.spec - Android APK build configuration
-# Generates Android APK after desktop testing
-#
-# Instructions:
-# 1. Install Linux or WSL (Windows Subsystem for Linux)
-# 2. Install Buildozer: pip install buildozer
-# 3. Build APK: buildozer android debug
-
 [app]
-# Application title (displayed on device)
-title = OCR Number Scanner
-
-# Package name (unique identifier)
+title = OCR Metal Scanner
 package.name = ocrscanner
+package.domain = org.metalocr
 
-# Package domain
-package.domain = org.sonalikha
-
-# Source code folder
+# Source directory where the main python live
 source.dir = .
 
-# Source files include
-source.include_exts = py,png,jpg,kv,atlas,db
+# List of dependencies to include for Android
+# Note: 'torch' and 'easyocr' are extremely heavy on Android. 
+requirements = python3,kivy,opencv,numpy,Pillow,easyocr,sqlite3,pyjnius
 
-# Exclude directories
-source.exclude_dirs = tests, bin, .buildozer
+# Android specific permissions
+android.permissions = CAMERA,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,INTERNET
 
-# App version
-version = 1.0
+# Android API and NDK versions
+android.api = 33
+android.minapi = 21
+android.ndk_api = 33
+android.ndk = 25b
 
-# Dependencies
-requirements = python3,kivy,opencv,numpy,pillow,easyocr
+# Use the modern AndroidX and Java 17
+android.accept_sdk_license = True
+android.enable_androidx = True
 
-# Orientation
+# Orientation (Portrait for mobile scanning)
 orientation = portrait
 
-# Android specific
-android.permissions = CAMERA,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,INTERNET
-
-# Android API level
-android.api = 31
-android.minapi = 24
-# android.sdk = 31 (deprecated in new buildozer)
-android.ndk = 25b
-android.ndk_api = 24
-
-# Android architecture
-android.archs = arm64-v8a, armeabi-v7a
-
-# Allow backup
-android.allow_backup = True
-
-# Icon (custom app icon path)
-# icon.filename = %(source.dir)s/assets/icon.png
-
-# Presplash
-# presplash.filename = %(source.dir)s/assets/presplash.png
-presplash_color = #070812
-
-# Fullscreen
+# Fullscreen mode
 fullscreen = 0
 
-[buildozer]
-# Build log level
+# Buildozer logging
 log_level = 2
+warn_on_root = 0
 
-# Disable root warning prompt (needed for Colab/Docker/CI)
+[buildozer]
 warn_on_root = 0
