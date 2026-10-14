@@ -12,10 +12,10 @@ name: Diagnostic - stripped APK to locate a device-only crash
 # The real pipeline is build-apk.yml; nothing here replaces it, uploads a product
 # artifact, or runs the emulator test.
 #
-# Renamed away from `strip`: in bash, `strip` is a reserved
-# variable name, and assigning to it can leave a later command in the same step
-# unrunnable ("strip: command not found"). Any input name that collides with a
-# command is unsafe to use as a shell variable, so the shell variable here is `mode`.
+# The shell variable is `mode`, never `strip`: bash reserves assignment to some
+# command names, and a step that does `strip=x` can go on to fail with
+# "strip: command not found" when it later runs a command of that name. Names that
+# collide with commands have no place in a shell step.
 #
 # What each mode does to buildozer.spec:
 #
