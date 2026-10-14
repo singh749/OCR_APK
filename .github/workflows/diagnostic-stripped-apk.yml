@@ -12,7 +12,7 @@ name: Diagnostic - stripped APK to locate a device-only crash
 # The real pipeline is build-apk.yml; nothing here replaces it, uploads a product
 # artifact, or runs the emulator test.
 #
-# The input is named `strip_mode`, not `strip`: in bash, `strip` is a reserved
+# Renamed away from `strip`: in bash, `strip` is a reserved
 # variable name, and assigning to it can leave a later command in the same step
 # unrunnable ("strip: command not found"). Any input name that collides with a
 # command is unsafe to use as a shell variable, so the shell variable here is `mode`.
@@ -35,21 +35,13 @@ name: Diagnostic - stripped APK to locate a device-only crash
 # freshly generated debug key, so Android refuses an overwrite install
 # (INSTALL_FAILED_UPDATE_INCOMPATIBLE) no matter which workflow produced the APK.
 on:
+  # No `inputs:` block. The two runs this file produced for the tag push came back as
+  # "failed because of a workflow file issue" with zero jobs - GitHub's validator, not
+  # YAML, and `PyYAML` happily accepted every byte of it - so the trigger is kept to
+  # the plainest shape that works and the mode comes from the tag name instead of a
+  # dispatch input. If the button is used (it appears once this file is on the default
+  # branch), the mode falls back to no-ocr-libs, which is the useful default anyway.
   workflow_dispatch:
-    inputs:
-      strip_mode:
-        description: 'What to remove from buildozer.spec for this diagnostic build'
-        required: true
-        default: no-ocr-libs
-        type: choice
-        options:
-          - no-ocr-libs
-          - kivy-only
-  # A tag push works from any branch, which matters because GitHub registers
-  # `workflow_dispatch` only from the default branch: while this file lives on a
-  # feature branch the button does not exist, and the tag is the only way to run it.
-  # The tag name *is* the mode. `build-apk.yml` filters `on.push` to main/master, so
-  # a tag can never start a second 45-minute product build beside this one.
   push:
     tags:
       - 'diagnostic-no-ocr-libs'
@@ -106,19 +98,17 @@ jobs:
 
       - name: Decide what to strip
         run: |
-          # The dispatch input when someone pressed the button; the tag name
-          # otherwise. Kept in the open rather than in a `${{ }}` ternary because
-          # the failure mode - a diagnostic that quietly built the full app - is
-          # worse than useless, so an unknown ref exits non-zero instead of
-          # defaulting.
-          mode="${{ github.event.inputs.strip_mode }}"
-          if [ -z "$mode" ]; then
-            case "$GITHUB_REF_NAME" in
-              diagnostic-kivy-only) mode="kivy-only" ;;
-              diagnostic-no-ocr-libs) mode="no-ocr-libs" ;;
-              *) echo "no mode for ref '$GITHUB_REF_NAME'" >&2; exit 1 ;;
-            esac
-          fi
+          # From the tag name, because a `workflow_dispatch` input is not available
+          # on every trigger and an explicitly-named tag is harder to get wrong than
+          # a dropdown. Only the button (default branch) has no tag to read, so it
+          # gets the default; a ref that looks like a diagnostic tag but is not one is
+          # an error rather than a silent default, because a diagnostic that quietly
+          # built the full app is worse than no diagnostic.
+          case "$GITHUB_REF_NAME" in
+            diagnostic-kivy-only) mode="kivy-only" ;;
+            diagnostic-no-ocr-libs) mode="no-ocr-libs" ;;
+            *) mode="no-ocr-libs" ;;
+          esac
           echo "STRIP_MODE=$mode" >> "$GITHUB_ENV"
           echo "diagnostic mode: $mode"
 
