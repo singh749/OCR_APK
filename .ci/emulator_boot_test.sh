@@ -140,13 +140,20 @@ case "$verdict" in
     ;;
 esac
 
-# Now that Python is up: give Kivy a frame to draw (build() schedules the layout
-# record ~1s later) and confirm the process is still there - a death on the first
-# timer or the first draw shows up here.
+# Now that Python is up: wait for the app to report the layout it actually got, and
+# confirm the process is still there - a death on the first timer or the first draw
+# shows up here.
+#
+# The record has to say `laid_out=yes`, and waiting for *any* layout record is not
+# enough: before Kivy's first layout pass every size is the 100x100 widget default,
+# which is what an early CI run reported as `preview=26x0 scanbtn=0x141` (26 =
+# 100 - 2*dp(14)) and what would otherwise be blamed on the app. main.py re-arms
+# its own report until the screen matches the window, so this loop only has to wait
+# for that event instead of sleeping.
 for _i in $(seq 1 "${BOOT_SETTLE_TRIES:-24}"); do
   sleep "${BOOT_WAIT_STEP:-5}"
   adb logcat -d > "$LOGCAT" 2>&1
-  if grep -a -q "OCRDIAG layout" "$LOGCAT"; then break; fi
+  if grep -a -q "OCRDIAG layout.*laid_out=yes" "$LOGCAT"; then break; fi
   if grep -a -q "OCRDIAG fatal" "$LOGCAT"; then
     fail "main.py reported a fatal record: $(grep -a -m1 'OCRDIAG fatal' "$LOGCAT" | cut -c1-200)"
   fi
@@ -168,22 +175,36 @@ fi
 final_pid="$(adb shell pidof "$PKG" 2>/dev/null | tr -d '\r')"
 [ -n "$final_pid" ] || fail "app died after logging startup: no pid at the end of the test"
 
-# "The interface looks tiny", measured: Kivy was given the whole surface, not a
-# forced 400x750 box.
-win="$(grep -a -o -E "OCRDIAG layout window=[0-9]+x[0-9]+" "$DIAG" | head -1 | grep -o -E "[0-9]+x[0-9]+")"
-[ -n "$win" ] || fail "no 'OCRDIAG layout window=' record: build() never reported its layout"
+# "The interface looks tiny" and "half of it is missing", measured on the last
+# layout record: Kivy was given the whole surface, not a forced 400x750 box, and
+# every row on the visible screen has a non-zero size.
+layout_line="$(grep -a 'OCRDIAG layout window=' "$DIAG" | tail -1)"
+[ -n "$layout_line" ] || fail "no 'OCRDIAG layout window=' record: build() never reported its layout"
+printf '%s' "$layout_line" | grep -q "laid_out=yes" ||
+  fail "the current screen never got a layout pass - the UI is blank or unsized on this device: ${layout_line}"
+win="$(printf '%s' "$layout_line" | grep -o -E "window=[0-9]+x[0-9]+" | grep -o -E "[0-9]+x[0-9]+")"
+[ -n "$win" ] || fail "the layout record has no window= size: $(printf '%s' "$layout_line" | cut -c1-160)"
 w="${win%x*}"
 h="${win#*x}"
 if [ "$w" -lt 720 ] || [ "$h" -lt 1000 ]; then
   fail "UI rendered into ${win}px instead of filling the screen (Window.size forced on Android?)"
 fi
+for pair in preview scanbtn result; do
+  size="$(printf '%s' "$layout_line" | grep -o -E "${pair}=[0-9]+x[0-9]+" | head -1 | grep -o -E "[0-9]+x[0-9]+")"
+  [ -n "$size" ] || continue   # that widget may legitimately live on another screen
+  rw="${size%x*}"
+  rh="${size#*x}"
+  if [ "$rw" -eq 0 ] || [ "$rh" -eq 0 ]; then
+    fail "row '${pair}' measured ${size}px on a laid-out screen - it is invisible on the phone: ${layout_line}"
+  fi
+done
 
 echo "=== device log records"
 while IFS= read -r line; do
   echo "  $line"
   echo "::notice::$line"
 done < "$DIAG"
-say "app started, window is ${win}px, no fatal markers"
+say "app started, window is ${win}px, rows laid out, no fatal markers"
 say '```'
 say "$(tr '\n' '|' < "$DIAG" | cut -c1-1500)"
 say '```'

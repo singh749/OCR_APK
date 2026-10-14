@@ -136,11 +136,14 @@ launches it and asserts on logcat (`.ci/emulator_boot_test.sh`):
 | the pid is still there when the layout record lands | a crash after the first frame (a broken timer, a bad popup) |
 | `FATAL EXCEPTION` / `Fatal signal` / `ANR in` absent in logcat | Java- and native-level deaths |
 | no `E python : Traceback` in logcat | a Python exception during import or `build()` |
-| `OCRDIAG layout window=<W>x<H>` with W >= 720 | the **"interface renders tiny"** bug, measured instead of eyeballed |
+| `OCRDIAG layout window=<W>x<H> ... laid_out=yes` with W >= 720 and no row measured 0px |
+  the **"interface renders tiny"** and **"half the screen is blank"** bugs, measured instead of
+  eyeballed. `laid_out=yes` is required because before Kivy's first layout pass every size is the
+  100x100 widget default, which looks identical to a collapsed layout |
 | at least one `OCRDIAG` record at all | `build()` never finished, i.e. Python died very early |
 
 The records come from `main.py`'s `log_diag()`: `OCRDIAG startup ...`, `OCRDIAG problem ...`,
-`OCRDIAG layout window=... preview=...`, `OCRDIAG fatal ...`, and
+`OCRDIAG layout window=... preview=... laid_out=yes`, `OCRDIAG fatal ...`, and
 `OCRDIAG engine method=... alts=...` after each scan (which engine answered). On a real phone the same lines
 are the whole diagnosis:
 

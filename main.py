@@ -413,15 +413,30 @@ class OCRScannerApp(App):
         except Exception:  # noqa: BLE001 - cosmetic only
             pass
 
-    def _report_layout(self, _dt):
-        """Record what the window and the main rows actually measure.
+    #: how long to wait for the first layout pass: 40 x 0.25s = 10s of frames
+    LAYOUT_REPORT_TRIES = 40
+
+    def _report_layout(self, _dt=None):
+        """Record what the window and the current screen actually measure.
 
         This is the automated answer to "the interface looks small": the numbers
-        below are the pixel size Kivy was given and the size each row ended up
-        with, so a layout that was squeezed into a fixed box fails CI instead of
-        being spotted by hand on a phone.
+        below are the pixels Kivy was given and the size each row ended up with, so
+        a layout squeezed into a fixed box fails CI instead of being spotted by hand
+        on a phone.
+
+        It re-arms itself until the screen has actually been laid out, because a
+        size read before the first layout pass is Kivy's 100x100 widget default and
+        not the phone - on a cold device that default is exactly what CI reported
+        (`preview=26x0 scanbtn=0x141`, i.e. 100 - 2*dp(14)), and it looked like a
+        collapsed layout. Same lesson as the boot test, one level down: wait for the
+        event, never for a stopwatch. The record says which case it is, so
+        `laid_out=no` is a real blank-screen bug and not a slow emulator.
         """
+        tries = getattr(self, "_layout_tries", 0) + 1
+        self._layout_tries = tries
         parts = []
+        window = laid_out = None
+        screen = None
         try:
             from kivy.metrics import Metrics
             window = getattr(sys.modules.get("kivy.core.window"), "Window", None)
@@ -431,14 +446,27 @@ class OCRScannerApp(App):
             parts.append("density={:.2f}".format(Metrics.density or 0.0))
             if self.root is not None:
                 parts.append("root={}x{}".format(int(self.root.width), int(self.root.height)))
-                screen = self.root.get_screen('main')
-                for key, name in (("preview_box", "preview"), ("scan_btn", "scanbtn"),
-                                  ("result_number", "result")):
-                    widget = screen.ids.get(key) if hasattr(screen.ids, "get") else None
-                    if widget is not None:
-                        parts.append("{}={}x{}".format(name, int(widget.width), int(widget.height)))
+                # the screen the user is actually looking at, not the one we assume
+                screen = getattr(self.root, "current_screen", None)
+                if screen is not None:
+                    parts.append("screen={}".format(screen.name or "?"))
+                    laid_out = (abs(screen.width - self.root.width) <= 1
+                                and abs(screen.height - self.root.height) <= 1)
+                    for key, name in (("preview_box", "preview"), ("scan_btn", "scanbtn"),
+                                      ("result_number", "result")):
+                        widget = screen.ids.get(key) if hasattr(screen.ids, "get") else None
+                        if widget is not None:
+                            parts.append("{}={}x{}".format(name, int(widget.width),
+                                                           int(widget.height)))
         except Exception as exc:  # noqa: BLE001 - diagnostics must not raise
             parts.append("error={}: {}".format(type(exc).__name__, exc))
+        parts.append("laid_out={}".format("yes" if laid_out else "no"))
+
+        if laid_out is False and tries < self.LAYOUT_REPORT_TRIES:
+            Clock.schedule_once(self._report_layout, 0.25)
+            if tries == 1:
+                log_diag("layout", "waiting for the first layout pass")
+            return
         log_diag("layout", " ".join(parts))
 
     # -- messaging ----------------------------------------------------------
