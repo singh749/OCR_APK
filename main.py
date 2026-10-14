@@ -17,6 +17,7 @@ closes the app ("it crashes") with nothing to read:
 
 import os
 import shutil
+import re
 import sys
 import threading
 import traceback
@@ -417,27 +418,37 @@ class OCRScannerApp(App):
         except Exception:  # noqa: BLE001 - cosmetic only
             pass
 
-    def _force_layout_pass(self):
-        """Ask Kivy for the layout pass instead of waiting for a frame to deliver it.
+    def _force_layout_pass(self, passes=5):
+        """Size the widget tree by hand, level by level, before measuring it.
 
-        `Layout` runs its pass through `Clock.create_trigger(self.do_layout, -1)`,
-        i.e. once per frame. On the CI emulator a frame takes ~45 s (EGL_emulation
-        reports `avg=45179.50ms`), so a report taken one second after build()
-        measures Kivy's un-laid-out 100x100 widget default and reads as a collapsed
-        layout. `do_layout()` is public, documented as directly callable, and pure
-        arithmetic - no drawing, no GL - so calling it makes the numbers below the
-        numbers the phone will actually use, on any device at any frame rate.
+        Kivy applies layouts in `Clock.create_trigger(self.do_layout, -1)` - once per
+        frame - and `Layout.do_layout()` only assigns sizes to a layout's *direct*
+        children; nothing in the tree recurses on demand. On the CI emulator a frame
+        takes 23-45 s (EGL_emulation says so), so every size read a second after
+        build() is the 100x100 widget default - and one forced call is not enough
+        either, because the grandchildren of the content box are still waiting for a
+        frame. Walking the tree one level per pass, parents before children, is pure
+        arithmetic (no draw, no GL) and makes each widget report the size a 60 fps
+        phone gives it a frame later.
         """
-        targets = [self.root]
+        if self.root is None:
+            return
         screen = getattr(self.root, "current_screen", None)
-        if screen is not None:
-            targets.append(screen)
-            targets.extend(list(getattr(screen, "children", []) or [])[:1])
-        for widget in targets:
-            try:
-                widget.do_layout()
-            except Exception:  # noqa: BLE001 - a diagnostic must never break the app
-                pass
+        frontier = [self.root] + ([screen] if screen is not None else [])
+        for _ in range(passes):
+            if not frontier:
+                break
+            children = []
+            for widget in frontier:
+                try:
+                    widget.do_layout()
+                except Exception:  # noqa: BLE001 - a diagnostic never breaks the app
+                    pass
+                try:
+                    children.extend(list(widget.children))
+                except Exception:  # noqa: BLE001
+                    pass
+            frontier = children
 
     #: how long to wait for the first layout pass: 40 x 0.25s = 10s of frames
     LAYOUT_REPORT_TRIES = 40
@@ -499,9 +510,25 @@ class OCRScannerApp(App):
                                                            int(widget.height)))
         except Exception as exc:  # noqa: BLE001 - diagnostics must not raise
             parts.append("error={}: {}".format(type(exc).__name__, exc))
+        # `deep=` is the answer to "were the rows themselves sized, or did the
+        # layout stop one level early?". The rows are what the test asserts on, so
+        # the record has to admit when they are still 0 for the structural reason
+        # above - otherwise a shallow measurement reads as a broken app, which is
+        # how `scanbtn=0x141` once blamed a healthy layout on a phone.
+        flat = []
+        try:
+            # findall() with two groups hands back tuples, so both numbers are
+            # flattened here rather than fed to int() directly. This whole stamp is
+            # wrapped because a diagnostic that can raise inside a Clock callback
+            # takes the app down with it.
+            found = re.findall(r"(?:preview|scanbtn|result)=(\d+)x(\d+)", " ".join(parts))
+            flat = [int(value) for pair in found for value in pair]
+        except Exception:  # noqa: BLE001
+            flat = []
         parts.append("laid_out={}".format("yes" if laid_out else "no"))
+        parts.append("deep={}".format("yes" if (laid_out and flat and min(flat) > 0) else "no"))
 
-        if laid_out is False and tries < self.LAYOUT_REPORT_TRIES:
+        if (laid_out is False or parts[-1].endswith("deep=no")) and tries < self.LAYOUT_REPORT_TRIES:
             Clock.schedule_once(self._report_layout, 0.25)
             if tries == 1:
                 log_diag("layout", "waiting for the first layout pass")
