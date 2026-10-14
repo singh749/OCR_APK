@@ -12,7 +12,7 @@ version = 1.0
 source.dir = .
 source.include_exts = py,png,jpg,jpeg,kv,atlas
 # keep build junk out of the APK payload
-source.exclude_dirs = bin, build, dist, temp_images, easyocr_models, venv, .venv, __pycache__
+source.exclude_dirs = bin, build, dist, tests, temp_images, easyocr_models, venv, .venv, __pycache__
 source.exclude_patterns = license,authors.*
 
 # ---------------------------------------------------------------------------

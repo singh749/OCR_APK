@@ -75,6 +75,21 @@ jobs:
           python -m pip install buildozer "cython<3.2" legacy-cgi virtualenv
           buildozer --version
 
+      - name: Check the .kv wiring against main.py
+        # Kivy binds the UI to Python at runtime, so a .kv file can call a handler
+        # that does not exist and every build step still succeeds - the app then
+        # closes on the first tap on the phone. This is the only place that can
+        # catch it, and it costs two seconds.
+        run: python3 .ci/check_kv_wiring.py
+
+      - name: Test the OCR result pipeline
+        # extract_numbers() only runs when a real engine is importable, which is
+        # never true on the Android host, so its candidate/scoring layer is tested
+        # here instead, against a stubbed engine.
+        run: |
+          python -m pip install --quiet opencv-python-headless numpy
+          python tests/test_ocr_pipeline.py
+
       - name: Show effective buildozer.spec
         run: grep -vE '^[[:space:]]*(#|$)' buildozer.spec
 

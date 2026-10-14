@@ -243,7 +243,11 @@ class MainScreen(Screen):
             self.ids.engine_label.text = "Engine: not installed"
         else:
             self.ids.result_number.text = cleaned if cleaned else "No number detected"
-            self.ids.engine_label.text = "Engine: {} OCR".format(method) if method else "Engine: -"
+            variant = ocr_data.get("variant", "")
+            label = "Engine: {} OCR".format(method) if method else "Engine: -"
+            if variant:
+                label += "  |  image: {}".format(variant)
+            self.ids.engine_label.text = label
 
         self.ids.confidence_bar.value = min(conf, 100)
         self.ids.confidence_label.text = "{:.1f}%".format(conf)
@@ -355,8 +359,10 @@ class OCRScannerApp(App):
             field = TextInput(text=text, readonly=True, multiline=True, size_hint=(1, 1),
                               background_normal='', background_color=(0.1, 0.11, 0.16, 1),
                               foreground_color=(0.95, 0.85, 0.7, 1), font_size=sp(13))
-            Popup(title="Something went wrong", content=field, size_hint=(0.94, 0.7),
-                  separator_color=(0.2, 0.85, 1, 1), background_color=(0.12, 0.13, 0.18, 1)).open()
+            popup = self._error_popup = Popup(
+                title="Something went wrong", content=field, size_hint=(0.94, 0.7),
+                separator_color=(0.2, 0.85, 1, 1), background_color=(0.12, 0.13, 0.18, 1))
+            popup.open()
         except Exception:
             pass  # never let error reporting cause an error
 
@@ -365,10 +371,19 @@ class OCRScannerApp(App):
         root = BoxLayout(orientation='vertical', padding=dp(14), spacing=dp(10))
         root.add_widget(Label(text="App could not start", font_size=sp(22), bold=True,
                               color=(0.95, 0.4, 0.35, 1), size_hint_y=None, height=dp(48)))
-        root.add_widget(ScrollView(size_hint_y=1).add_widget(
-            TextInput(text=text, readonly=True, multiline=True, size_hint_y=None,
-                      background_normal='', background_color=(0.1, 0.11, 0.16, 1),
-                      foreground_color=(0.95, 0.85, 0.7, 1), font_size=sp(12))))
+        scroll = ScrollView(size_hint_y=1)
+        field = TextInput(text=text, readonly=True, multiline=True, size_hint_y=None,
+                          background_normal='', background_color=(0.1, 0.11, 0.16, 1),
+                          foreground_color=(0.95, 0.85, 0.7, 1), font_size=sp(12))
+        def _grow(inst, _val):
+            # documented TextInput-in-a-ScrollView sizing, with a guard so the
+            # binding can never feed itself back in a loop
+            target = max(dp(44), inst.minimum_height)
+            if inst.height != target:
+                inst.height = target
+        field.bind(minimum_height=_grow)
+        scroll.add_widget(field)
+        root.add_widget(scroll)
         return root
 
     def _flash(self, message):
@@ -474,6 +489,17 @@ class OCRScannerApp(App):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_activity_result(self, request_code, result_code, data):
+        # Called on the Android UI thread by the Java listener: hand everything
+        # over to the Kivy event loop, which is the only thread allowed to touch
+        # widgets, and do the same for the (blocking) copy of the picked image.
+        try:
+            Clock.schedule_once(lambda _dt: self._handle_activity_result(
+                request_code, result_code, data), 0)
+        except Exception:
+            Logger.error("OCRScanner: cannot schedule activity result\n" + traceback.format_exc())
+
+    @safe
+    def _handle_activity_result(self, request_code, result_code, data):
         from jnius import autoclass
         Activity = autoclass("android.app.Activity")
 
@@ -495,6 +521,7 @@ class OCRScannerApp(App):
         self._pending_uri = None
         Clock.schedule_once(lambda _dt: self._use_image(dest), 0)
 
+    @safe
     def _use_image(self, path, auto_scan=False):
         if not os.path.exists(path):
             self._flash("Image file is missing")
@@ -547,6 +574,7 @@ class OCRScannerApp(App):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    @safe
     def _on_ocr_done(self, result):
         screen = self.root.get_screen('main')
         screen.ids.scan_btn.text = "SCAN NUMBER"

@@ -94,6 +94,51 @@ of harmless SDL2 `warning:` lines would otherwise use them all up.
 
 ---
 
+### The two that only showed up on the phone
+
+| # | Symptom | Cause and fix |
+| --- | --- | --- |
+| 11 | The APK installed fine, then closed itself the moment **Camera**, **Copy** or the History search box was used | `main.kv` called `app.open_camera()`, `app.copy_number()` and `app.search_history()`, and no such method existed on the App class: an exception inside a button callback is uncaught, so Android killed the app. `.kv` files are **not executed at build time**, so no build step could ever have shown this. All three exist now, every handler runs through `@safe` (a readable, copyable dialog instead of a silent close), and CI now fails the build on it - see `.ci/check_kv_wiring.py` |
+| 12 | Everything rendered small and clipped, as if the app were a 400x750 card floating on the screen | `main.py` set `Window.size = (400, 750)` at import time. On a desktop that resizes a window; on Android the window size *is* the surface Kivy lays the whole app out into, so the UI was built at 400px wide and shown on a full-resolution framebuffer. The call is now desktop-only, guarded (`kivy.core.window.Window` is `None` when no window provider exists) and moved into `build()`. Row heights use `dp()`, the preview fills the space above the buttons and overlays its own placeholder, and every text label binds `text_size` so long text wraps instead of running off |
+
+Nothing was wrong with the screen density: `android:anyDensity="true"` is already set by
+python-for-android's bootstrap manifest, so chasing `anyDensity`/`compatible-screens` is a
+wasted afternoon. If the UI still looks off on a device, the fix is in the layout numbers,
+not in the manifest.
+
+## Guards that run before the (30-minute) build
+
+```
+Check the .kv wiring against main.py   # .ci/check_kv_wiring.py
+Test the OCR result pipeline           # tests/test_ocr_pipeline.py
+```
+
+The first one fails the build when `main.kv` calls `app.something()` (or `root.something()`)
+that `main.py` does not define, or reads `self.ids.<name>` for an `id:` the kv never declares
+- both are guaranteed `AttributeError`/`KeyError` on the phone, and both were invisible to
+every other step. The second drives `ocr_engine.extract_numbers()` with a stubbed Tesseract,
+because that code path cannot run on an Android host at all (no engine recipe), which is
+exactly why its bugs went unnoticed: it used to report the *preprocessing variant* as the
+engine name, hard-code 65% confidence, raise `UnboundLocalError` whenever a variant read
+nothing, and glue the printed label onto the value (`"NO U6234"` -> `"NOU6234"`).
+
+Label words are now removed from the **raw text while its spaces still exist**, which is the
+only reliable signal that `NO` is a label rather than the start of `NOW12345`: the second
+stays whole, the first becomes `U6234`.
+
+## On the phone
+
+* **Camera** hands the job to the system camera app and asks for a full-resolution photo,
+  written to `Pictures/OCRScanner` through MediaStore and read back from the activity result.
+  Nothing is scaled down, so small characters stay legible, and no storage permission is
+  needed on Android 10+. A plain `file://` path would be rejected outright
+  (`FileUriExposedException`), and buildozer cannot inject the `FileProvider` that would be
+  the alternative, which is why the write goes through `ContentResolver.insert`.
+* **History search** and **Copy** are plain Kivy: search filters the stored rows, Copy uses
+  the App's clipboard.
+* If a button ever shows the red dialog, tap **Copy** and paste it into an issue - that text
+  is the actual cause, which a crash on the phone never shows you.
+
 ## OCR engine on Android — read this
 
 `ocr_engine.py` prefers **EasyOCR** and falls back to **pytesseract**; both are

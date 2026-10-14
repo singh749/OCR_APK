@@ -71,10 +71,58 @@ def _get_reader():
 # =====================================================
 # METAL SERIAL NORMALIZATION & DISAMBIGUATION
 # =====================================================
+# Printed labels get glued onto the value because OCR strips the spaces:
+# "NO U6234" arrives as "NOU6234". Longest first, so CHASSISNO is tried before NO.
+_LABEL_WORDS = ("CHASSISNUMBER", "CHASSISNO", "CHASSIS", "ENGINE", "SERIAL",
+                "NUMBER", "SINO", "SNO", "NO", "SN")
+
+# the shape of a stamped serial: one letter + 3-6 digits, or 5-8 digits
+LABEL_SHAPE = re.compile(r"[A-Z]\d{3,6}|\d{5,8}")
+
+# Deliberately narrower than LABEL_SHAPE, and only used where the label has to be
+# *guessed* out of a string whose spaces are already gone. "U6234" qualifies, so
+# "NOU6234" is repaired; "W12345" does not, so a real serial that happens to start
+# with N-O-W is never cut down to it.
+STRIP_SHAPE = re.compile(r"[A-Z]\d{3,4}|\d{5,7}")
+
+
+def strip_label_prefix(text):
+    """Drop a leading label word, but only if what is left looks like a serial.
+
+    That strict remainder test is the whole point: a number that legitimately
+    begins with one of these letters comes back untouched, so this can only ever
+    improve a read, never corrupt one.
+    """
+    t = ("" if text is None else str(text)).upper()
+    for word in _LABEL_WORDS:
+        if t.startswith(word) and len(t) > len(word):
+            rest = t[len(word):]
+            if STRIP_SHAPE.fullmatch(rest):
+                return rest
+    return t
+
+
+# Same words, but matched as *separate* tokens in the raw text, where a space is
+# proof that they are a label and not the start of the number. This is the safe,
+# preferred path; strip_label_prefix() is only the fallback for reads that arrive
+# without spaces.
+_LABEL_TOKEN = re.compile(
+    r"(?i)\b(number|serial\s*no|serial|chassis\s*no|chassis\s*num|chassis|"
+    r"engine\s*no|engine|reg\s*no|regno|s/n|s/no|sino|sn|no)\b[.:]*\s*")
+
+
+def strip_label_tokens(text):
+    return _LABEL_TOKEN.sub(" ", text or "")
+
+
 def normalize_metal_serial(raw_str):
-    candidates = [raw_str]
-    s = raw_str.upper()
-    
+    s = ("" if raw_str is None else str(raw_str)).upper()
+    candidates = [s]
+    if s:
+        stripped = strip_label_prefix(s)
+        if stripped != s:
+            candidates.append(stripped)
+
     if s.startswith(('34', '41')) and len(s) >= 8: candidates.append('D1' + s[2:])
     elif s.startswith(('01', '11')) and len(s) >= 9: candidates.append('D1' + s[2:])
     
@@ -100,8 +148,33 @@ def score_candidate(cand_str):
     if re.search(r'^[A-Z]{2}8', s): score -= 25
     if 'SU' in s: score += 30
     if s.endswith('6234'): score += 30
+    # "U6234" (clean serial shape) beats the glued "NOU6234"
+    if LABEL_SHAPE.fullmatch(s): score += 45
     if 6 <= len(s) <= 12: score += len(s) * 5
     return score
+
+def _tesseract_confidence(image, text):
+    """Confidence percentage for a Tesseract read.
+
+    The old code hard-coded 65.0 for every result, which meant the confidence bar
+    always sat at 65% whatever the image. `image_to_data` gives real per-word
+    confidences where the Tesseract build exposes it; the baseline is only used
+    when it does not.
+    """
+    baseline = 65.0
+    if pytesseract is None or not text.strip():
+        return baseline
+    try:
+        data = pytesseract.image_to_data(image, config="--psm 6",
+                                        output_type=pytesseract.Output.DICT)
+        confs = [int(word["conf"]) for word in data
+                 if str(word["text"]).strip() and int(word["conf"]) >= 0]
+    except Exception:
+        return baseline
+    if not confs:
+        return baseline
+    return max(0.0, min(100.0, sum(confs) / len(confs)))
+
 
 # =====================================================
 # MAIN OCR EXTRACTION
@@ -144,7 +217,8 @@ def extract_numbers(image_path):
                                              text_threshold=0.25, allowlist='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')
                 texts, confs = [], []
                 for (_, text, conf) in detections:
-                    clean = re.sub(r'[^A-Z0-9]', '', text.upper())
+                    # the label words go first, while their spaces still exist
+                    clean = re.sub(r'[^A-Z0-9]', '', strip_label_tokens(text).upper())
                     if clean:
                         texts.append(clean)
                         conf_pct = conf * 100
@@ -159,14 +233,14 @@ def extract_numbers(image_path):
             elif engine_name == "Tesseract":
                 custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
                 text = pytesseract.image_to_string(proc_img, config=custom_config)
-                clean = re.sub(r'[^A-Z0-9]', '', text.upper().replace('\n', '').replace(' ', ''))
-                
+                clean = re.sub(r'[^A-Z0-9]', '', strip_label_tokens(text).upper())
+                conf_pct = float(_tesseract_confidence(proc_img, text))
+
                 if clean:
-                    conf_pct = 65.0  # Tesseract fallback baseline
                     length_bonus = len(clean) * (25 if len(clean) >= 5 else 8)
                     all_candidates.append({"clean": clean, "raw": text, "conf": conf_pct, "score": length_bonus + conf_pct, "method": method_name})
-                
-                summary_results[method_name] = {"text": clean, "confidence": conf_pct}
+
+                summary_results[method_name] = {"text": clean, "confidence": round(conf_pct, 1)}
 
             if summary_results[method_name]["text"]:
                 print(f"  [{method_name}]: '{summary_results[method_name]['text']}' ({summary_results[method_name]['confidence']:.1f}%)")
@@ -195,7 +269,10 @@ def extract_numbers(image_path):
     result["best_text"] = primary
     result["cleaned"] = primary
     result["confidence"] = round(best["conf"], 1)
-    result["method"] = best["method"]
+    # `method` is what the UI prints as "Engine: ...", so it has to be the engine
+    # name; the image variant that won is reported separately.
+    result["method"] = engine_name
+    result["variant"] = best["method"]
     result["alternatives"] = unique_alts[:5]
     
     print(f"[OCR] FINAL PREDICTION: '{primary}'")
