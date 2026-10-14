@@ -1,5 +1,9 @@
-#:import dp kivy.metrics.dp
-#:import sp kivy.metrics.sp
+# Sizing rules for this file:
+#  * fixed-height rows use dp(), everything that should absorb spare space uses
+#    size_hint_y: 1 - that is what keeps the layout sane on both a 5" phone and
+#    a desktop window instead of shrinking into the middle of the screen;
+#  * Labels that can hold long text bind text_size to their own size, otherwise
+#    Kivy never wraps them and the text runs off the screen.
 
 <MainScreen>:
     name: 'main'
@@ -12,173 +16,218 @@
 
     BoxLayout:
         orientation: 'vertical'
-        padding: dp(15)
-        spacing: dp(15)
+        padding: [dp(14), dp(12)]
+        spacing: dp(12)
 
-        # Top Bar
+        # ---- Top bar ----
         BoxLayout:
             size_hint_y: None
-            height: dp(50)
+            height: dp(52)
+            spacing: dp(10)
             Label:
                 text: "Metal Serial Scanner"
-                font_size: sp(20)
+                font_size: sp(21)
                 bold: True
                 color: 0.2, 0.85, 1, 1
+                text_size: self.size
+                halign: 'left'
+                valign: 'center'
             Button:
                 text: "History"
                 size_hint_x: None
-                width: dp(100)
+                width: dp(104)
+                font_size: sp(15)
                 background_normal: ''
                 background_color: 0.15, 0.2, 0.3, 1
-                color: 0.8, 0.8, 0.8, 1
+                color: 0.85, 0.88, 0.95, 1
                 on_press: app.go_to_history()
 
-        # Image Preview Area
-        BoxLayout:
-            size_hint_y: 0.4
+        # ---- Image preview (fills whatever space is left) ----
+        FloatLayout:
+            id: preview_box
+            size_hint_y: 1
             canvas.before:
                 Color:
                     rgba: 0.12, 0.13, 0.18, 1
                 RoundedRectangle:
                     pos: self.pos
                     size: self.size
-                    radius: [dp(15)]
-            
+                    radius: [dp(16)]
+
             Image:
                 id: preview_image
+                source: ''
                 allow_stretch: True
                 keep_ratio: True
-            
+                size_hint: 1, 1
+                opacity: 1 if (self.texture and self.texture.size[0] > 1) else 0
+
             Label:
                 id: no_image_label
-                text: "Upload or Capture an Image"
-                color: 0.4, 0.45, 0.55, 1
+                text: "No image yet\n\nUpload a photo or use the camera,\nthen press SCAN NUMBER"
+                markup: True
                 font_size: sp(16)
+                color: 0.42, 0.47, 0.58, 1
+                size_hint: 1, 1
+                text_size: self.size
+                halign: 'center'
+                valign: 'middle'
+                opacity: 1 if (not preview_image.texture or preview_image.texture.size[0] <= 1) else 0
 
-        # Action Buttons
+        # ---- Actions ----
         BoxLayout:
             size_hint_y: None
-            height: dp(50)
-            spacing: dp(10)
+            height: dp(54)
+            spacing: dp(8)
             Button:
-                text: "Upload Image"
+                text: "Upload"
+                font_size: sp(15)
+                bold: True
                 background_normal: ''
                 background_color: 0.2, 0.6, 1, 1
-                bold: True
                 on_press: app.open_file_picker()
             Button:
                 text: "Camera"
+                font_size: sp(15)
+                bold: True
                 background_normal: ''
                 background_color: 0.15, 0.65, 0.45, 1
-                bold: True
                 on_press: app.open_camera()
             Button:
                 id: scan_btn
                 text: "SCAN NUMBER"
+                font_size: sp(15)
+                bold: True
                 background_normal: ''
                 background_color: 0.8, 0.2, 0.2, 1
-                bold: True
                 on_press: app.run_ocr()
 
-        # Results Panel
+        # ---- Result panel ----
         BoxLayout:
-            size_hint_y: 0.35
             orientation: 'vertical'
-            spacing: dp(10)
+            size_hint_y: None
+            height: dp(196)
+            spacing: dp(8)
+            padding: [dp(12), dp(10)]
             canvas.before:
                 Color:
                     rgba: 0.1, 0.11, 0.16, 1
                 RoundedRectangle:
                     pos: self.pos
                     size: self.size
-                    radius: [dp(15)]
-            
+                    radius: [dp(16)]
+
             BoxLayout:
                 size_hint_y: None
-                height: dp(40)
+                height: dp(58)
+                spacing: dp(8)
                 Label:
                     id: result_number
                     text: "---"
-                    font_size: sp(28)
+                    font_size: sp(30)
                     bold: True
                     color: 0.2, 0.9, 0.55, 1
+                    text_size: self.size
+                    halign: 'left'
+                    valign: 'middle'
                 Button:
                     text: "Copy"
                     size_hint_x: None
-                    width: dp(80)
+                    width: dp(84)
+                    font_size: sp(15)
                     background_normal: ''
                     background_color: 0.3, 0.3, 0.4, 1
                     on_press: app.copy_number()
 
             BoxLayout:
                 size_hint_y: None
-                height: dp(30)
+                height: dp(26)
                 Label:
                     id: engine_label
                     text: "Engine: -"
-                    font_size: sp(12)
-                    color: 0.6, 0.6, 0.7, 1
+                    font_size: sp(14)
+                    color: 0.6, 0.63, 0.72, 1
+                    text_size: self.size
+                    halign: 'left'
+                    valign: 'middle'
                 Label:
                     id: confidence_label
                     text: "0%"
-                    font_size: sp(14)
+                    font_size: sp(15)
                     bold: True
                     color: 0.9, 0.8, 0.2, 1
-            
+                    text_size: self.size
+                    halign: 'right'
+                    valign: 'middle'
+
             ProgressBar:
                 id: confidence_bar
                 max: 100
                 value: 0
                 size_hint_y: None
-                height: dp(10)
-            
+                height: dp(12)
+
             BoxLayout:
                 size_hint_y: None
-                height: dp(30)
+                height: dp(36)
+                spacing: dp(8)
                 Label:
-                    text: "Suggestions:"
+                    text: "Similar:"
                     size_hint_x: None
-                    width: dp(100)
-                    font_size: sp(12)
-                    color: 0.5, 0.5, 0.6, 1
+                    width: dp(78)
+                    font_size: sp(14)
+                    color: 0.5, 0.55, 0.65, 1
+                    text_size: self.size
+                    halign: 'left'
+                    valign: 'middle'
                 ScrollView:
+                    id: suggestions_scroll
                     do_scroll_y: False
+                    bar_width: dp(2)
                     BoxLayout:
                         id: suggestions_chips
+                        orientation: 'horizontal'
                         size_hint_x: None
+                        size_hint_y: 1
                         width: self.minimum_width
-                        spacing: dp(5)
-                        padding: [0, dp(5)]
+                        spacing: dp(6)
 
-        # Comparison / Bottom Bar
+        # ---- Per-method comparison ----
         BoxLayout:
             size_hint_y: None
-            height: dp(40)
-            spacing: dp(10)
+            height: dp(44)
+            spacing: dp(8)
             Label:
                 id: tess_result
                 text: "---"
-                font_size: sp(12)
+                font_size: sp(13)
                 color: 0.5, 0.7, 1, 1
+                text_size: self.size
+                halign: 'center'
+                valign: 'middle'
                 canvas.before:
                     Color:
                         rgba: 0.15, 0.18, 0.25, 1
                     RoundedRectangle:
                         pos: self.pos
                         size: self.size
-                        radius: [dp(8)]
+                        radius: [dp(10)]
             Label:
                 id: easy_result
                 text: "---"
-                font_size: sp(12)
+                font_size: sp(13)
                 color: 0.5, 0.7, 1, 1
+                text_size: self.size
+                halign: 'center'
+                valign: 'middle'
                 canvas.before:
                     Color:
                         rgba: 0.15, 0.18, 0.25, 1
                     RoundedRectangle:
                         pos: self.pos
                         size: self.size
-                        radius: [dp(8)]
+                        radius: [dp(10)]
+
 
 <HistoryScreen>:
     name: 'history'
@@ -191,48 +240,62 @@
 
     BoxLayout:
         orientation: 'vertical'
-        padding: dp(15)
-        spacing: dp(15)
+        padding: [dp(14), dp(12)]
+        spacing: dp(12)
 
-        # Top Bar
         BoxLayout:
             size_hint_y: None
-            height: dp(50)
+            height: dp(52)
+            spacing: dp(10)
             Button:
                 text: "< Back"
                 size_hint_x: None
-                width: dp(80)
+                width: dp(92)
+                font_size: sp(15)
                 background_normal: ''
                 background_color: 0.3, 0.3, 0.4, 1
                 on_press: app.go_to_main()
             Label:
                 text: "Scan History"
-                font_size: sp(20)
+                font_size: sp(21)
                 bold: True
                 color: 0.2, 0.85, 1, 1
+                text_size: self.size
+                halign: 'left'
+                valign: 'center'
             Label:
                 id: total_label
                 text: "0 records"
                 size_hint_x: None
-                width: dp(100)
+                width: dp(96)
                 font_size: sp(14)
-                color: 0.6, 0.6, 0.7, 1
+                color: 0.6, 0.63, 0.72, 1
+                text_size: self.size
+                halign: 'right'
+                valign: 'center'
 
-        # Search Bar
         TextInput:
-            hint_text: "Search serial number or notes..."
+            id: search_field
+            hint_text: "Search serial number, engine or date..."
+            font_size: sp(15)
             size_hint_y: None
-            height: dp(45)
+            height: dp(48)
             multiline: False
+            padding: [dp(10), dp(13)]
+            background_normal: ''
             background_color: 0.15, 0.16, 0.22, 1
             foreground_color: 1, 1, 1, 1
+            hint_text_color: 0.42, 0.47, 0.58, 1
+            cursor_color: 0.2, 0.85, 1, 1
             on_text_validate: app.search_history(self.text)
+            on_focus: if not self.focus: app.search_history(self.text)
 
-        # History List
         ScrollView:
+            do_scroll_x: False
             BoxLayout:
                 id: history_list
                 orientation: 'vertical'
                 size_hint_y: None
                 height: self.minimum_height
                 spacing: dp(10)
+                padding: [0, dp(6)]

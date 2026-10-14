@@ -1,24 +1,32 @@
 # =====================================================
 # OCR Number Scanner - Project Requirements
 # Specialized for Engraved/Stamped Metal Serial Numbers
+#
+# NOTE: this file is for the *desktop* dev environment only
+# (pip install -r requirements.txt). The Android APK is built by
+# python-for-android from `buildozer.spec` -> `requirements`, and that
+# list is different because p4a only ships what it has recipes for
+# (no torch / easyocr / tesseract on Android -- see README.md).
 # =====================================================
 
 # --- UI Framework (Kivy) ---
 Kivy==2.3.1
-kivy-deps.angle==0.4.0
-kivy-deps.glew==0.3.1
-kivy_deps.sdl2==0.8.0
 Kivy-Garden==0.1.5
+# Windows-only binary helpers. The markers keep `pip install -r requirements.txt`
+# working on Linux/macOS CI runners instead of failing on these lines.
+kivy-deps.angle>=0.4.0 ; sys_platform == "win32"
+kivy-deps.glew>=0.3.1 ; sys_platform == "win32"
+kivy-deps.sdl2>=0.8.0 ; sys_platform == "win32"
 
 # --- Computer Vision & Image Processing ---
 opencv-python>=4.8.0
-numpy>=1.24.0
+numpy>=1.26.0
 Pillow>=10.0.0
 
-# --- OCR Engine (Offline & Mobile Ready) ---
+# --- OCR Engine (desktop / high-end devices, optional) ---
 easyocr>=1.7.0
 torch>=2.0.0
 torchvision>=0.15.0
 
-# --- Optional / OCR Fallbacks ---
+# --- Optional OCR Fallback (needs the tesseract binary on PATH) ---
 pytesseract>=0.3.10

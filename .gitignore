@@ -1,0 +1,29 @@
+# Buildozer / python-for-android build output
+.buildozer/
+bin/
+*.apk
+*.aab
+*.keystore
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+
+# App runtime data (never belongs in the repo)
+temp_images/
+easyocr_models/
+ocr_history.db
+buildozer.log
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/
+
+# CI log capture (.github/workflows/build-apk.yml)
+build.log
+startup_error.txt
+startup_trace.txt

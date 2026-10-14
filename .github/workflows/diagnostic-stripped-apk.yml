@@ -1,0 +1,156 @@
+name: Diagnostic - stripped APK to locate a device-only crash
+
+# Why this exists: a phone can fail in a way no CI job here can see. CI boots an
+# x86_64 APK (an arm64 APK cannot be installed on an x86_64 emulator), the phone
+# installs arm64, and the only difference is which native libraries get loaded. So
+# when a handset closes the app on open while CI is green, the question is *which
+# library*, and the way to answer it without a cable, a root, or a logcat is to
+# ship the same app with pieces removed and see what still opens.
+#
+# It is manual-only on purpose: the dispatch button (which GitHub only registers
+# from the default branch) or a tag push, which is how it runs from a feature branch.
+# The real pipeline is build-apk.yml; nothing here replaces it, uploads a product
+# artifact, or runs the emulator test.
+#
+# The shell variable is `mode`, never `strip`: bash reserves assignment to some
+# command names, and a step that does `strip=x` can go on to fail with
+# "strip: command not found" when it later runs a command of that name. Names that
+# collide with commands have no place in a shell step.
+#
+# What each mode does to buildozer.spec:
+#
+#   no-ocr-libs  - removes `numpy` and `opencv` (and the ML Kit Gradle dependency).
+#                  The app still has pyjnius, sqlite3, camera/gallery intents and
+#                  its own UI. If this opens and the full build does not, the crash
+#                  is inside a native math/image library for that ABI - and since
+#                  main.py now imports those lazily on the scan thread, the full
+#                  build should open too, which makes the report worth re-sending.
+#                  A scan here says "The OCR library could not be loaded", by design.
+#   kivy-only    - removes everything except CPython, Kivy and the Android bridge.
+#                  If even this closes on open, the problem is not our libraries at
+#                  all: it is Kivy's window/GL provider on that device, and the
+#                  useful next step is the Kivy log lines, not this repo's code.
+#
+# Install over the old app? No - uninstall first. Every CI build is signed with a
+# freshly generated debug key, so Android refuses an overwrite install
+# (INSTALL_FAILED_UPDATE_INCOMPATIBLE) no matter which workflow produced the APK.
+on:
+  # No `inputs:` block. The two runs this file produced for the tag push came back as
+  # "failed because of a workflow file issue" with zero jobs - GitHub's validator, not
+  # YAML, and `PyYAML` happily accepted every byte of it - so the trigger is kept to
+  # the plainest shape that works and the mode comes from the tag name instead of a
+  # dispatch input. If the button is used (it appears once this file is on the default
+  # branch), the mode falls back to no-ocr-libs, which is the useful default anyway.
+  workflow_dispatch:
+  push:
+    tags:
+      - 'diagnostic-no-ocr-libs'
+      - 'diagnostic-kivy-only'
+
+permissions:
+  contents: read
+
+concurrency:
+  # Opposite of the product workflow's choice, and deliberately: a diagnostic that
+  # has been superseded is worthless, so the newest one wins immediately instead of
+  # queueing behind a 40-minute build nobody is waiting for any more.
+  group: ocr-apk-diagnostic-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Static: on a tag run there is no dispatch input to interpolate, and a job
+    # name that renders as an empty string is a bad trade for a little detail.
+    name: Build stripped debug APK (diagnostic)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake autopoint gettext \
+            ccache cmake git lbzip2 make patch \
+            libffi-dev libltdl-dev libncurses-dev libssl-dev libtinfo6 libtool \
+            pkg-config python3 python3-dev python3-pip python3-venv \
+            unzip wget zip zlib1g-dev
+
+      - name: Install Python build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install buildozer "cython<3.2" legacy-cgi virtualenv
+          buildozer --version
+
+      - name: Decide what to strip
+        run: |
+          # From the tag name, because a `workflow_dispatch` input is not available
+          # on every trigger and an explicitly-named tag is harder to get wrong than
+          # a dropdown. Only the button (default branch) has no tag to read, so it
+          # gets the default; a ref that looks like a diagnostic tag but is not one is
+          # an error rather than a silent default, because a diagnostic that quietly
+          # built the full app is worse than no diagnostic.
+          case "$GITHUB_REF_NAME" in
+            diagnostic-kivy-only) mode="kivy-only" ;;
+            diagnostic-no-ocr-libs) mode="no-ocr-libs" ;;
+            *) mode="no-ocr-libs" ;;
+          esac
+          echo "STRIP_MODE=$mode" >> "$GITHUB_ENV"
+          echo "diagnostic mode: $mode"
+
+      - name: Strip the app
+        run: |
+          mode="$STRIP_MODE"
+          # `sed` and not a templated spec: this file must stay obviously derived
+          # from the real buildozer.spec, so the only edit is the deletion of the
+          # lines named above and the effective spec is printed for the log.
+          case "$mode" in
+            no-ocr-libs)
+              sed -i 's/^\(requirements = .*\),numpy,opencv$/\1/' buildozer.spec
+              ;;
+            kivy-only)
+              sed -i 's/^requirements = .*/requirements = python3==3.13.16,hostpython3==3.13.16,kivy,android/' buildozer.spec
+              ;;
+            *)
+              echo "unknown mode: $mode" >&2; exit 1 ;;
+          esac
+          sed -i '/^android\.gradle_dependencies/d' buildozer.spec
+          echo "::notice::diagnostic mode=$mode" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "### Effective requirements (diagnostic, mode: $mode)" >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^requirements|^android.gradle_dependencies' buildozer.spec | tee -a "$GITHUB_STEP_SUMMARY"
+          if grep -q ',numpy' buildozer.spec && [ "$mode" = no-ocr-libs ]; then
+            echo "::error::the requirements line was not rewritten - check the sed pattern"
+            exit 1
+          fi
+
+      - name: Force a fresh python-for-android checkout
+        run: rm -rf "$HOME/.buildozer/android/platform/python-for-android"
+
+      - name: Build debug APK with Buildozer
+        run: |
+          set -o pipefail
+          buildozer --verbose android debug 2>&1 \
+            | tee build.log \
+            | sed -E '/warning:|[[:space:]]note:|to allow an error code/d'
+
+      - name: Upload the diagnostic APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: OCR-Scanner-Diagnostic-APK
+          path: bin/*.apk
+          if-no-files-found: error
+          retention-days: 14
