@@ -106,6 +106,23 @@ python-for-android's bootstrap manifest, so chasing `anyDensity`/`compatible-scr
 wasted afternoon. If the UI still looks off on a device, the fix is in the layout numbers,
 not in the manifest.
 
+### pyjnius and nested Android classes
+
+`MediaStore.Images.Media` and `Build.VERSION` are **not** fields of their outer class, so
+`autoclass("android.provider.MediaStore").Images` raises `AttributeError` on the device - the
+build cannot see it, the Camera button finds it immediately. Nested classes have to be named
+the way the JVM does, with `$`:
+
+```python
+Images = autoclass("android.provider.MediaStore$Images$Media")   # EXTERNAL_CONTENT_URI, ...
+Build_VERSION = autoclass("android.os.Build$VERSION")            # SDK_INT
+```
+
+That is the form python-for-android's own helpers use (`android/storage.py`,
+`android/permissions.py`), so copy from those when a call misbehaves. Only fields that really
+are static (`MediaStore.ACTION_IMAGE_CAPTURE`, `Intent.FLAG_GRANT_WRITE_URI_PERMISSION`,
+`Activity.RESULT_OK`) may be read off the outer class.
+
 ## Guards that run before the (30-minute) build
 
 ```
